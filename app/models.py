@@ -162,6 +162,7 @@ class Developer(LifecycleMixin, SnapshotMixin, Base):
     name: Mapped[str] = mapped_column(String(500), index=True)
     website: Mapped[str | None] = mapped_column(Text)
     about: Mapped[str | None] = mapped_column(Text)
+    logo_url: Mapped[str | None] = mapped_column(Text)
 
     offices: Mapped[list | None] = mapped_column(JsonCol)
     areas_active_in: Mapped[list | None] = mapped_column(JsonCol)
@@ -185,6 +186,15 @@ class Area(LifecycleMixin, SnapshotMixin, Base):
     gallery: Mapped[list | None] = mapped_column(JsonCol)
     meta: Mapped[dict | None] = mapped_column(JsonCol)
 
+    @property
+    def thumbnail_url(self) -> str | None:
+        """First gallery image, same derivation as Project.thumbnail_url."""
+        if isinstance(self.gallery, list) and self.gallery:
+            first = self.gallery[0]
+            if isinstance(first, dict):
+                return first.get("url")
+        return None
+
 
 class Broker(LifecycleMixin, Base):
     __tablename__ = "brokers"
@@ -197,6 +207,7 @@ class Broker(LifecycleMixin, Base):
     email: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(100))
     bio: Mapped[str | None] = mapped_column(Text)
+    photo_url: Mapped[str | None] = mapped_column(Text)
 
     emails: Mapped[list | None] = mapped_column(JsonCol)
     phones: Mapped[list | None] = mapped_column(JsonCol)

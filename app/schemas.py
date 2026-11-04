@@ -99,6 +99,7 @@ class DeveloperSummary(SnapshotFields):
     name: str
     url: str
     website: str | None = None
+    logo_url: str | None = None
     is_active: bool = True
 
 
@@ -116,6 +117,7 @@ class AreaSummary(SnapshotFields):
     name: str
     url: str
     intro: str | None = None
+    thumbnail_url: str | None = None
     is_active: bool = True
 
 
@@ -137,6 +139,7 @@ class BrokerSummary(ORMModel):
     role: str | None = None
     email: str | None = None
     phone: str | None = None
+    photo_url: str | None = None
     is_active: bool = True
 
 

@@ -864,12 +864,18 @@ def parse_developer(url: str, html: str) -> dict:
         None,
     )
 
+    # The developer's own logo is the first non-chrome image on the page --
+    # it renders in the profile header, ahead of any project photo cards.
+    _imgs = gallery(html, soup)
+    logo_url = _imgs[0]["url"] if _imgs else None
+
     return {
         "entity": "developer",
         "slug": slug,
         "url": url,
         "name": clean(h1.get_text(" ")) if h1 else slug,
         "website": website,
+        "logo_url": logo_url,
         "snapshot": _snapshot(soup),
         "areas_active_in": counted_chips(soup, r"where .* build|areas"),
         "about": about,
@@ -939,12 +945,18 @@ def parse_broker(url: str, html: str) -> dict:
             t = clean(nxt.get_text(" "))
             role = t if 0 < len(t) < 90 else None
 
+    # Not every broker has uploaded a headshot -- first non-chrome image when
+    # present, None otherwise (confirmed against real pages, not a bug).
+    _imgs = gallery(html, soup)
+    photo_url = _imgs[0]["url"] if _imgs else None
+
     return {
         "entity": "broker",
         "slug": slug,
         "url": url,
         "name": clean(h1.get_text(" ")) if h1 else clean(person.get("name")) or slug,
         "role": role or clean(person.get("jobTitle")) or None,
+        "photo_url": photo_url,
         "email": own_emails[0] if own_emails else None,
         "phone": own_phones[0] if own_phones else None,
         "emails": own_emails,
