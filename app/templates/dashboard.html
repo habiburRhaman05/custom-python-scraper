@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>maisondubai data — dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1a1d23; --muted: #6b7280;
+    --border: #e3e6ea; --accent: #2563eb; --accent-bg: #eff4ff;
+    --ok: #16a34a; --ok-bg: #ecfdf3; --warn: #d97706; --warn-bg: #fff8ec;
+    --bad: #dc2626; --bad-bg: #fef2f2; --run: #2563eb; --run-bg: #eff4ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8eb; --muted: #9aa1ac;
+      --border: #272b33; --accent: #5b8def; --accent-bg: #16213a;
+      --ok: #4ade80; --ok-bg: #0f2a1a; --warn: #fbbf24; --warn-bg: #2a2109;
+      --bad: #f87171; --bad-bg: #2a1212; --run: #5b8def; --run-bg: #16213a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10; flex-wrap: wrap; gap: 12px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }
+  .row { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .panel h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); margin: 0 0 14px;
+  }
+  .kpis { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .kpi { background: var(--accent-bg); border-radius: 8px; padding: 12px 14px; }
+  .kpi .v { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .kpi .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  button {
+    font: inherit; border: none; border-radius: 7px; padding: 8px 14px;
+    cursor: pointer; font-weight: 600; font-size: 13px;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:disabled { opacity: .5; cursor: default; }
+  .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .btn-ghost:hover { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  .bar-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 5px 0; }
+  .bar-track { grid-column: 1 / -1; height: 6px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 2px; }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+    border-radius: 999px; text-transform: uppercase; letter-spacing: .03em;
+  }
+  .badge.success { background: var(--ok-bg); color: var(--ok); }
+  .badge.failed  { background: var(--bad-bg); color: var(--bad); }
+  .badge.aborted { background: var(--warn-bg); color: var(--warn); }
+  .badge.running { background: var(--run-bg); color: var(--run); }
+  details > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .banner {
+    display: none; padding: 12px 16px; border-radius: 8px; margin-bottom: -4px;
+    font-size: 13px; align-items: center; gap: 10px;
+  }
+  .banner.show { display: flex; }
+  .banner.running { background: var(--run-bg); color: var(--run); }
+  .banner.success { background: var(--ok-bg); color: var(--ok); }
+  .banner.failed, .banner.aborted { background: var(--bad-bg); color: var(--bad); }
+  .spin {
+    width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor;
+    border-right-color: transparent; animation: spin .7s linear infinite; flex: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .gate {
+    max-width: 380px; margin: 80px auto; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 28px; text-align: center;
+  }
+  .gate input {
+    width: 100%; padding: 9px 10px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit; margin: 14px 0;
+  }
+  .err { color: var(--bad); font-size: 12px; min-height: 16px; }
+  .empty { color: var(--muted); font-style: italic; padding: 10px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  .diff-old { color: var(--bad); text-decoration: line-through; }
+  .diff-new { color: var(--ok); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div id="gate" class="gate" style="display:none">
+  <h2 style="margin:0 0 6px">Admin key required</h2>
+  <p class="muted" style="margin:0">Enter the <code>ADMIN_API_KEY</code> from the server's <code>.env</code>.
+  It is kept only in this browser tab (sessionStorage) — never sent anywhere but this API.</p>
+  <input id="keyInput" type="password" placeholder="X-API-Key" autocomplete="off" />
+  <button class="btn-primary" id="keySubmit" style="width:100%">Unlock dashboard</button>
+  <div class="err" id="keyErr"></div>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <div>
+      <h1>maisondubai data — dashboard</h1>
+      <div class="sub" id="lastRun">loading…</div>
+    </div>
+    <div style="display:flex; gap:10px">
+      <button class="btn-ghost" id="refreshBtn">Refresh</button>
+      <button class="btn-primary" id="triggerBtn">Trigger scrape now</button>
+      <button class="btn-ghost" id="logoutBtn">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="scrapeBanner" class="banner running">
+      <div class="spin"></div>
+      <span id="scrapeBannerText"></span>
+    </div>
+
+    <div class="panel">
+      <h2>Dataset overview</h2>
+      <div class="kpis" id="kpis"></div>
+    </div>
+
+    <div class="row">
+      <div class="panel">
+        <h2>Top developers</h2>
+        <div id="topDevelopers"></div>
+      </div>
+      <div class="panel">
+        <h2>Top areas</h2>
+        <div id="topAreas"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Handover by year</h2>
+      <div id="handoverYears"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Scrape run history</h2>
+      <table>
+        <thead><tr>
+          <th>Run</th><th>Trigger</th><th>Status</th><th>Started</th><th>Duration</th>
+          <th>Pages</th><th>Changes</th><th>Detail</th>
+        </tr></thead>
+        <tbody id="runsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Recent changes</h2>
+      <table>
+        <thead><tr>
+          <th>When</th><th>Entity</th><th>Slug</th><th>Field</th><th>Change</th>
+        </tr></thead>
+        <tbody id="changesBody"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const KEY_STORAGE = "maisondubai_admin_key";
+  let pollHandle = null;
+
+  function h(s) {
+    if (s === null || s === undefined) return "";
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toLocaleString(undefined, {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  function fmtDur(sec) {
+    if (sec === null || sec === undefined) return "—";
+    if (sec < 60) return `${sec.toFixed(1)}s`;
+    const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+    return `${m}m ${s}s`;
+  }
+
+  function fmtNum(n) {
+    return n === null || n === undefined ? "—" : Number(n).toLocaleString();
+  }
+
+  async function api(path, { auth = false, method = "GET", params = null } = {}) {
+    let url = path;
+    if (params) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v === undefined || v === null) continue;
+        if (Array.isArray(v)) v.forEach(x => qs.append(k, x));
+        else qs.set(k, v);
+      }
+      const s = qs.toString();
+      if (s) url += (url.includes("?") ? "&" : "?") + s;
+    }
+    const headers = {};
+    if (auth) headers["X-API-Key"] = sessionStorage.getItem(KEY_STORAGE) || "";
+    const res = await fetch(url, { method, headers });
+    if (res.status === 401) {
+      showGate("Admin key rejected — check .env and try again.");
+      throw new Error("unauthorized");
+    }
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = JSON.stringify(await res.json()); } catch {}
+      throw new Error(`${res.status}: ${detail}`);
+    }
+    return res.status === 204 ? null : res.json();
+  }
+
+  // --- gate -----------------------------------------------------------
+  function showGate(err) {
+    stopPolling();
+    document.getElementById("app").style.display = "none";
+    document.getElementById("gate").style.display = "block";
+    document.getElementById("keyErr").textContent = err || "";
+    document.getElementById("keyInput").focus();
+  }
+
+  function showApp() {
+    document.getElementById("gate").style.display = "none";
+    document.getElementById("app").style.display = "block";
+  }
+
+  document.getElementById("keySubmit").addEventListener("click", async () => {
+    const val = document.getElementById("keyInput").value.trim();
+    if (!val) return;
+    sessionStorage.setItem(KEY_STORAGE, val);
+    try {
+      await api("/api/admin/runs", { auth: true, params: { limit: 1 } });
+      showApp();
+      loadAll();
+    } catch {
+      // showGate already called with the 401 message inside api()
+    }
+  });
+  document.getElementById("keyInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("keySubmit").click();
+  });
+
+  document.getElementById("logoutBtn").addEventListener("click", () => {
+    sessionStorage.removeItem(KEY_STORAGE);
+    showGate("");
+  });
+
+  // --- bar lists --------------------------------------------------------
+  function renderBars(container, items, labelKey, countKey) {
+    if (!items || !items.length) {
+      container.innerHTML = '<div class="empty">No data yet — run a scrape.</div>';
+      return;
+    }
+    const max = Math.max(...items.map(i => i[countKey] || 0), 1);
+    container.innerHTML = items.map(i => `
+      <div class="bar-row">
+        <span>${h(i[labelKey] || i.slug)}</span>
+        <span class="muted">${fmtNum(i[countKey])}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${(i[countKey] / max * 100).toFixed(1)}%"></div></div>
+      </div>
+    `).join("");
+  }
+
+  function renderYearBars(container, yearsObj) {
+    const entries = Object.entries(yearsObj || {}).sort((a, b) => a[0].localeCompare(b[0]));
+    if (!entries.length) {
+      container.innerHTML = '<div class="empty">No handover data yet.</div>';
+      return;
+    }
+    const max = Math.max(...entries.map(([, n]) => n), 1);
+    container.innerHTML = entries.map(([year, n]) => `
+      <div class="bar-row">
+        <span>${h(year)}</span>
+        <span class="muted">${fmtNum(n)}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${(n / max * 100).toFixed(1)}%"></div></div>
+      </div>
+    `).join("");
+  }
+
+  // --- stats --------------------------------------------------------
+  async function loadStats() {
+    const s = await api("/api/stats");
+    const kpis = document.getElementById("kpis");
+    const counts = s.counts || {};
+    const rows = [
+      ["Projects", counts.projects],
+      ["Price coverage", `${s.price_coverage_pct}%`],
+      ["Developers", counts.developers],
+      ["Areas", counts.areas],
+      ["Brokers", counts.brokers],
+      ["Articles", counts.learn ?? counts.articles],
+    ];
+    kpis.innerHTML = rows.map(([label, v]) => `
+      <div class="kpi"><div class="v">${typeof v === "number" ? fmtNum(v) : h(v ?? "—")}</div><div class="l">${h(label)}</div></div>
+    `).join("");
+
+    renderBars(document.getElementById("topDevelopers"), s.top_developers, "name", "projects");
+    renderBars(document.getElementById("topAreas"), s.top_areas, "name", "projects");
+    renderYearBars(document.getElementById("handoverYears"), s.handover_years);
+
+    const last = s.last_run;
+    document.getElementById("lastRun").textContent = last
+      ? `Last run: #${last.id} · ${last.status} · ${fmtDate(last.started_at)}`
+      : "No scrapes recorded yet";
+  }
+
+  // --- runs --------------------------------------------------------
+  function changeSummary(counts) {
+    if (!counts) return "—";
+    let created = 0, updated = 0, delisted = 0;
+    for (const c of Object.values(counts)) {
+      created += c.created || 0; updated += c.updated || 0; delisted += c.delisted || 0;
+    }
+    if (!created && !updated && !delisted) return '<span class="muted">no changes</span>';
+    const parts = [];
+    if (created) parts.push(`<span style="color:var(--ok)">+${created} new</span>`);
+    if (updated) parts.push(`<span style="color:var(--accent)">${updated} updated</span>`);
+    if (delisted) parts.push(`<span style="color:var(--bad)">${delisted} delisted</span>`);
+    return parts.join(" · ");
+  }
+
+  function runDetailHtml(run) {
+    const bits = [];
+    if (run.error) bits.push(`<div style="color:var(--bad)">${h(run.error)}</div>`);
+    if (run.validation && run.validation.checks) {
+      bits.push("<ul style='margin:6px 0 0; padding-left:16px'>" + run.validation.checks.map(c =>
+        `<li style="color:${c.passed ? "var(--ok)" : "var(--bad)"}">${c.passed ? "✓" : "✗"} ${h(c.check)} — ${h(c.detail)}</li>`
+      ).join("") + "</ul>");
+    }
+    if (run.counts) {
+      bits.push("<div class='mono' style='margin-top:6px'>" +
+        Object.entries(run.counts).map(([e, c]) =>
+          `${h(e)}: created ${c.created} / updated ${c.updated} / unchanged ${c.unchanged} / delisted ${c.delisted}`
+        ).join("<br>") + "</div>");
+    }
+    return bits.join("") || '<span class="muted">nothing to show</span>';
+  }
+
+  async function loadRuns() {
+    const runs = await api("/api/admin/runs", { auth: true, params: { limit: 25 } });
+    const body = document.getElementById("runsBody");
+    if (!runs.length) {
+      body.innerHTML = '<tr><td colspan="8" class="empty">No runs yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = runs.map(r => `
+      <tr>
+        <td>#${r.id}</td>
+        <td>${h(r.trigger)}</td>
+        <td><span class="badge ${h(r.status)}">${h(r.status)}</span></td>
+        <td>${fmtDate(r.started_at)}</td>
+        <td>${fmtDur(r.duration_seconds)}</td>
+        <td class="muted">${fmtNum(r.pages_fetched)} fetched · ${fmtNum(r.pages_not_modified)} unchanged</td>
+        <td>${changeSummary(r.counts)}</td>
+        <td><details><summary>view</summary>${runDetailHtml(r)}</details></td>
+      </tr>
+    `).join("");
+  }
+
+  // --- changes --------------------------------------------------------
+  async function loadChanges() {
+    const changes = await api("/api/changes/recent", { params: { limit: 50 } });
+    const body = document.getElementById("changesBody");
+    if (!changes.length) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">No field changes recorded yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = changes.map(c => `
+      <tr>
+        <td class="muted">${fmtDate(c.changed_at)}</td>
+        <td>${h(c.entity)}</td>
+        <td class="mono">${h(c.slug)}</td>
+        <td>${h(c.field)}</td>
+        <td><span class="diff-old">${h(c.old_value ?? "∅")}</span> → <span class="diff-new">${h(c.new_value ?? "∅")}</span></td>
+      </tr>
+    `).join("");
+  }
+
+  async function loadAll() {
+    try {
+      await Promise.all([loadStats(), loadRuns(), loadChanges()]);
+      maybeResumePolling();
+    } catch (e) {
+      if (String(e.message) !== "unauthorized") console.error(e);
+    }
+  }
+
+  // --- trigger + polling --------------------------------------------------------
+  function setBanner(status, text) {
+    const b = document.getElementById("scrapeBanner");
+    b.className = `banner show ${status}`;
+    document.getElementById("scrapeBannerText").textContent = text;
+    const spinner = b.querySelector(".spin");
+    if (spinner) spinner.style.display = status === "running" ? "block" : "none";
+  }
+
+  function hideBanner() {
+    document.getElementById("scrapeBanner").classList.remove("show");
+  }
+
+  function stopPolling() {
+    if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+  }
+
+  function pollRun(runId) {
+    stopPolling();
+    const started = Date.now();
+    const tick = async () => {
+      let run;
+      try { run = await api(`/api/admin/runs/${runId}`, { auth: true }); }
+      catch { return; }
+      const elapsed = Math.round((Date.now() - started) / 1000);
+      if (run.status === "running") {
+        setBanner("running", `Scrape #${runId} running… ${elapsed}s elapsed`);
+        document.getElementById("triggerBtn").disabled = true;
+      } else {
+        stopPolling();
+        document.getElementById("triggerBtn").disabled = false;
+        const msg = run.status === "success"
+          ? `Scrape #${runId} finished in ${fmtDur(run.duration_seconds)}.`
+          : `Scrape #${runId} ${run.status}: ${run.error || "see run detail below"}`;
+        setBanner(run.status, msg);
+        setTimeout(hideBanner, 8000);
+        loadAll();
+      }
+    };
+    tick();
+    pollHandle = setInterval(tick, 4000);
+  }
+
+  async function maybeResumePolling() {
+    // If a scrape is already running (e.g. the page was reloaded mid-run,
+    // or cron kicked one off), pick up polling instead of staying silent.
+    try {
+      const runs = await api("/api/admin/runs", { auth: true, params: { status: "running", limit: 1 } });
+      if (runs.length) {
+        document.getElementById("triggerBtn").disabled = true;
+        pollRun(runs[0].id);
+      }
+    } catch {}
+  }
+
+  document.getElementById("triggerBtn").addEventListener("click", async () => {
+    if (!confirm("Start a full scrape now? A full run takes roughly 20 minutes.")) return;
+    document.getElementById("triggerBtn").disabled = true;
+    try {
+      const res = await fetch("/api/admin/scrape", {
+        method: "POST",
+        headers: { "X-API-Key": sessionStorage.getItem(KEY_STORAGE) || "" },
+      });
+      const body = await res.json();
+      if (res.status === 409) {
+        setBanner("running", `A scrape is already running (#${body.run_id}).`);
+        pollRun(body.run_id);
+        return;
+      }
+      if (!res.ok) throw new Error(JSON.stringify(body));
+      setBanner("running", `Scrape #${body.run_id} started…`);
+      pollRun(body.run_id);
+    } catch (e) {
+      document.getElementById("triggerBtn").disabled = false;
+      alert("Failed to start scrape: " + e.message);
+    }
+  });
+
+  document.getElementById("refreshBtn").addEventListener("click", loadAll);
+
+  // --- boot --------------------------------------------------------
+  (async () => {
+    const saved = sessionStorage.getItem(KEY_STORAGE);
+    if (!saved) { showGate(""); return; }
+    try {
+      await api("/api/admin/runs", { auth: true, params: { limit: 1 } });
+      showApp();
+      loadAll();
+    } catch {
+      // showGate already triggered by api() on 401
+    }
+  })();
+})();
+</script>
+</body>
+</html>

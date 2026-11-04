@@ -1,0 +1,27 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# scraper artifacts — these get large (output ~136MB, cache ~576MB)
+output/
+.cache_maisondubai/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# local sqlite
+*.db
+*.sqlite3
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

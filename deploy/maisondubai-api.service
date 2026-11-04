@@ -1,0 +1,44 @@
+# /etc/systemd/system/maisondubai-api.service
+#
+#   sudo cp deploy/maisondubai-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now maisondubai-api
+#   sudo journalctl -u maisondubai-api -f
+
+[Unit]
+Description=maisondubai data API
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/api-scraper
+EnvironmentFile=/opt/api-scraper/.env
+
+# One worker on purpose. The scrape runs as a background task inside the API
+# process and is guarded by an in-process lock; a second worker would have its
+# own lock and could start a parallel 2,662-page crawl.
+ExecStart=/opt/api-scraper/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# A full scrape holds memory for ~20 minutes; leave headroom.
+MemoryMax=2G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/api-scraper
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maisondubai-api
+
+[Install]
+WantedBy=multi-user.target

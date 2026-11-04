@@ -1,0 +1,16 @@
+# Versions below are the ones this project was built and verified against.
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+SQLAlchemy==2.1.8
+alembic==1.20.1
+pydantic==2.14.2
+pydantic-settings==2.16.2
+python-dotenv==1.2.4
+
+# Postgres driver (install on the VPS; not needed for the SQLite dev path)
+psycopg[binary]==3.2.10
+
+# scraper
+requests==2.34.2
+beautifulsoup4==4.15.0
+lxml==6.1.3

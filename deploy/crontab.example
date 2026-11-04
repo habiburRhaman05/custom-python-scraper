@@ -1,0 +1,14 @@
+# Weekly refresh — Monday 06:00 server time.
+#   crontab -e   (as the deploy user)
+# Check the timezone first:  timedatectl
+#
+# Option A (recommended) — hit the API; it runs in the background and the
+# single-flight lock prevents overlap with a manual trigger.
+0 6 * * 1 curl -fsS -X POST -H "X-API-Key: YOUR_ADMIN_API_KEY" https://api.example.com/api/admin/scrape >> /var/log/maisondubai-scrape.log 2>&1
+
+# Option B — call the CLI directly (no HTTP, independent of the API process).
+# 0 6 * * 1 cd /opt/api-scraper && .venv/bin/python -m app.cli scrape --trigger cron >> /var/log/maisondubai-scrape.log 2>&1
+
+# Optional: alert if the most recent run did not succeed. Runs 90 minutes after
+# the scrape starts, which is well clear of the ~21 minute runtime.
+30 7 * * 1 cd /opt/api-scraper && .venv/bin/python -m app.cli runs --limit 1 | grep -q success || echo "maisondubai scrape did NOT succeed - check /api/admin/runs" | mail -s "scrape failed" you@example.com
