@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import time
 import concurrent.futures as cf
+import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -78,6 +80,62 @@ def _find_urls(value: Any, found: set[str]) -> None:
             _find_urls(v, found)
 
 
+def _find_urls_ordered(value: Any, out: list[str]) -> None:
+    """Same walk as _find_urls but preserves order, so list indexes are stable."""
+    if isinstance(value, str):
+        if is_media_url(value):
+            out.append(value)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _find_urls_ordered(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _find_urls_ordered(v, out)
+
+
+# How each column should be described in a generated filename.
+_COLUMN_LABELS = {
+    "gallery": "gallery",
+    "brochure_url": "brochure",
+    "floor_plan_url": "floor-plan",
+    "logo_url": "logo",
+    "photo_url": "photo",
+    "thumbnail_url": "thumbnail",
+}
+
+_ENTITY_PREFIX = {
+    "projects": "project", "developers": "developer", "areas": "area",
+    "brokers": "broker", "learn": "article", "pages": "page",
+}
+
+_SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def build_filename(entity: str, slug: str, column: str, index: int | None,
+                    url: str) -> str:
+    """
+    A human-readable GHL filename, e.g.
+
+        project-09-life-residences-gallery-03.webp
+        project-09-life-residences-brochure.pdf
+        developer-lmd-logo.webp
+
+    Falls back to the source basename only if there is no usable context,
+    which is what produced the opaque hashed names before.
+    """
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    if not ext or len(ext) > 6:
+        ext = ".jpg" if not url.lower().endswith(".pdf") else ".pdf"
+
+    label = _COLUMN_LABELS.get(column, column.replace("_url", "").replace("_", "-"))
+    parts = [_ENTITY_PREFIX.get(entity, entity.rstrip("s")), slug, label]
+    if index is not None:
+        parts.append(f"{index + 1:02d}")
+
+    name = _SAFE_NAME.sub("-", "-".join(p for p in parts if p)).strip("-")
+    return f"{name[:110]}{ext}"
+
+
 def _substitute(value: Any, mapping: dict[str, str]) -> Any:
     """Deep-copy `value`, replacing any mapped URL. Unmapped values pass through."""
     if isinstance(value, str):
@@ -94,10 +152,18 @@ class ScanResult:
     unique_urls: set[str] = field(default_factory=set)
     occurrences: int = 0
     by_table: dict[str, int] = field(default_factory=dict)
+    # url -> generated filename, built from the row it was found on. First
+    # occurrence wins, so a gallery image shared by two projects keeps one
+    # stable name rather than flip-flopping between runs.
+    names: dict[str, str] = field(default_factory=dict)
 
     def samples(self, n: int = 8) -> list[str]:
-        """A few real URLs, so the approval screen shows what will change."""
-        return sorted(self.unique_urls)[:n]
+        """A few real URLs (with their new names) for the approval screen."""
+        out = []
+        for url in sorted(self.unique_urls)[:n]:
+            name = self.names.get(url)
+            out.append(f"{name}  <-  {url}" if name else url)
+        return out
 
 
 def scan(db: Session) -> ScanResult:
@@ -108,8 +174,20 @@ def scan(db: Session) -> ScanResult:
         count = 0
         for row in db.execute(select(model)).scalars():
             row_urls: set[str] = set()
+            slug = getattr(row, "slug", None) or ""
             for col in columns:
-                _find_urls(getattr(row, col), row_urls)
+                value = getattr(row, col)
+                ordered: list[str] = []
+                _find_urls_ordered(value, ordered)
+                if not ordered:
+                    continue
+                row_urls.update(ordered)
+                multiple = len(ordered) > 1
+                for idx, url in enumerate(ordered):
+                    if url not in result.names:
+                        result.names[url] = build_filename(
+                            name, slug, col, idx if multiple else None, url
+                        )
             if row_urls:
                 count += len(row_urls)
                 result.unique_urls.update(row_urls)
@@ -128,11 +206,16 @@ class GHLError(Exception):
 
 class GHLClient:
     def __init__(self, pit_token: str, location_id: str, parent_folder_id: str = "",
-                 rate_limit_per_sec: float = 4.0):
+                 rate_limit_per_sec: float = 4.0,
+                 image_folder_id: str = "", pdf_folder_id: str = ""):
         if not pit_token or not location_id:
             raise GHLError("GHL_PIT_TOKEN and GHL_LOCATION_ID must be set in .env")
         self.location_id = location_id
         self.parent_folder_id = parent_folder_id
+        # Routed by file type so the media library stays organised instead of
+        # dumping ~38k files into the root.
+        self.image_folder_id = image_folder_id
+        self.pdf_folder_id = pdf_folder_id
         self._headers = {
             "Authorization": f"Bearer {pit_token}",
             "Version": GHL_VERSION,
@@ -145,6 +228,13 @@ class GHLClient:
         # Worker threads share this client, so the throttle has to be guarded
         # or the rate limit is meaningless (and GHL starts returning 429s).
         self._throttle_lock = threading.Lock()
+
+    def folder_for(self, url: str, filename: str) -> str:
+        """PDFs to the pdf folder, everything else to the image folder."""
+        is_pdf = (url.lower().split("?")[0].endswith(".pdf")
+                  or filename.lower().endswith(".pdf"))
+        chosen = self.pdf_folder_id if is_pdf else self.image_folder_id
+        return chosen or self.parent_folder_id
 
     @property
     def session(self) -> requests.Session:
@@ -193,8 +283,13 @@ class GHLClient:
             filename = (name or source_url.rsplit("/", 1)[-1].split("?", 1)[0] or "file")[:120]
 
             fields: dict[str, Any] = {"locationId": (None, self.location_id)}
-            if self.parent_folder_id:
-                fields["parentId"] = (None, self.parent_folder_id)
+            folder_id = self.folder_for(source_url, filename)
+            if folder_id:
+                fields["parentId"] = (None, folder_id)
+            # Send the name both ways: GHL honours the explicit `name` field
+            # over the multipart filename, and relying on the filename alone
+            # is undocumented behaviour.
+            fields["name"] = (None, filename)
             fields["file"] = (filename, content, content_type)
 
             self._throttle()
@@ -245,6 +340,7 @@ def upload_pending(db: Session, urls: set[str], client: GHLClient,
                     limit: int | None = None,
                     on_progress: Callable[[int, int, int, int], None] | None = None,
                     workers: int = 6,
+                    names: dict[str, str] | None = None,
                     ) -> dict[str, int]:
     """
     Upload every URL not already recorded as a success. Returns counts.
@@ -268,7 +364,9 @@ def upload_pending(db: Session, urls: set[str], client: GHLClient,
 
     def _fetch(url: str) -> tuple[str, dict | None, str | None]:
         """Network-only; runs on a worker thread. Never touches the session."""
-        name = url.rsplit("/", 1)[-1].split("?", 1)[0] or None
+        # Prefer the meaningful name derived from the owning row; fall back to
+        # the source basename only when there was no usable context.
+        name = (names or {}).get(url) or url.rsplit("/", 1)[-1].split("?", 1)[0] or None
         try:
             return url, client.upload_from_url(url, name=name), None
         except GHLError as exc:
@@ -352,4 +450,6 @@ def build_client() -> GHLClient:
     return GHLClient(
         settings.ghl_pit_token, settings.ghl_location_id,
         settings.ghl_parent_folder_id, settings.ghl_rate_limit_per_sec,
+        image_folder_id=settings.ghl_image_folder_id,
+        pdf_folder_id=settings.ghl_pdf_folder_id,
     )

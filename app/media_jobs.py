@@ -170,7 +170,8 @@ def run_upload(run_id: int, limit: int | None = None) -> None:
 
         counts = upload_pending(db, result.unique_urls, client, limit=limit,
                                  on_progress=_upload_progress,
-                                 workers=settings.ghl_workers)
+                                 workers=settings.ghl_workers,
+                                 names=result.names)
 
         def _replace_progress(done: int, total: int) -> None:
             run.progress = {"phase": "replacing", "done": done, "total": total}

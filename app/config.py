@@ -40,7 +40,11 @@ class Settings(BaseSettings):
     # needed if you run `python -m app.cli migrate-media`
     ghl_pit_token: str = ""
     ghl_location_id: str = ""
-    ghl_parent_folder_id: str = ""  # optional: upload into a specific media folder
+    ghl_parent_folder_id: str = ""  # fallback folder if the two below are unset
+    # Uploads are routed by type so the media library stays organised rather
+    # than dumping tens of thousands of files into the root.
+    ghl_image_folder_id: str = ""
+    ghl_pdf_folder_id: str = ""
     ghl_rate_limit_per_sec: float = 4.0
     # Parallel download+upload workers. Each file is ~2s of mostly network
     # wait, so sequential uploads would take ~20h for the full dataset.
