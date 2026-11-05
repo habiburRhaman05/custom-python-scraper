@@ -1114,12 +1114,26 @@ PARSERS = {
 }
 
 
+class ScrapePaused(Exception):
+    """Raised to unwind cleanly when should_pause() turns true mid-run."""
+    def __init__(self, partial: dict[str, list[dict]]):
+        self.partial = partial
+        super().__init__("scrape paused")
+
+
 def scrape_group(kind: str, urls: list[str], fetcher: Fetcher, workers: int,
-                  on_progress: Callable[[str, int, int], None] | None = None) -> list[dict]:
+                  on_progress: Callable[[str, int, int], None] | None = None,
+                  should_pause: Callable[[], bool] | None = None) -> list[dict]:
     """
     on_progress(kind, done, total) fires every 25 pages (same cadence as the
     console print) -- the job runner uses this to persist live progress to
     the database so a polling UI can show real numbers, not just a spinner.
+
+    should_pause(), if given, is checked after every page. Returning True
+    stops the loop from consuming further completions (already-dispatched
+    in-flight requests still finish, but nothing new is queued) and raises
+    ScrapePaused with whatever was collected so far -- nothing is lost, the
+    next run just re-fetches the remaining URLs (fast, via the HTML cache).
     """
     parser = PARSERS[kind]
     results: list[dict] = []
@@ -1148,6 +1162,9 @@ def scrape_group(kind: str, urls: list[str], fetcher: Fetcher, workers: int,
                           end="", flush=True)
                     if on_progress:
                         on_progress(kind, done, total)
+            if should_pause and should_pause():
+                print(f"\n  {kind:<12} paused at {done}/{total}")
+                raise ScrapePaused({kind: results})
     print()
     return results
 
@@ -1156,7 +1173,8 @@ def run_scrape(out: str = "output", only: Iterable[str] | None = None,
                limit: int | None = None, workers: int = 6, delay: float = 0.3,
                cache_dir: str | None = ".cache_maisondubai",
                revalidate: bool = False, write_json: bool = True,
-               on_progress: Callable[[dict], None] | None = None) -> dict[str, Any]:
+               on_progress: Callable[[dict], None] | None = None,
+               should_pause: Callable[[], bool] | None = None) -> dict[str, Any]:
     """
     Scrape and return {"meta":…, "cross_reference":…, <entity>: [records]}.
 
@@ -1168,6 +1186,13 @@ def run_scrape(out: str = "output", only: Iterable[str] | None = None,
          "overall_done": 1245, "overall_total": 2662}
     The job runner persists this to the ScrapeRun row so a polling UI shows
     real numbers instead of just an elapsed-time spinner.
+
+    should_pause, if given and it returns True, stops after the current
+    in-flight batch and returns whatever was fetched so far, with
+    meta["paused"] = True. Nothing is discarded or ingested as a false
+    "everything's gone" state -- the caller decides what a paused result
+    means. Re-running later is fast: already-fetched pages hit the HTML
+    cache (or return 304 with --revalidate).
     """
     os.makedirs(out, exist_ok=True)
     fetcher = Fetcher(cache_dir, delay=delay, revalidate=revalidate)
@@ -1199,6 +1224,7 @@ def run_scrape(out: str = "output", only: Iterable[str] | None = None,
     overall_done = 0
 
     print("\n[2/3] scraping")
+    paused = False
     for kind, urls in planned.items():
         if not urls:
             print(f"  {kind:<12} (none)")
@@ -1211,10 +1237,16 @@ def run_scrape(out: str = "output", only: Iterable[str] | None = None,
                     "overall_done": _prior + done, "overall_total": overall_total,
                 })
 
-        bundle[kind] = scrape_group(kind, urls, fetcher, workers, on_progress=_cb)
+        try:
+            bundle[kind] = scrape_group(kind, urls, fetcher, workers,
+                                         on_progress=_cb, should_pause=should_pause)
+        except ScrapePaused as exc:
+            bundle[kind] = exc.partial[kind]
+            paused = True
+            break
         overall_done += len(urls)
 
-    if "listings" in wanted:
+    if "listings" in wanted and not paused:
         html = fetcher.get(f"{BASE}/listings")
         items = parse_listing_index(f"{BASE}/listings", html) if html else []
         detail = []
@@ -1260,6 +1292,7 @@ def run_scrape(out: str = "output", only: Iterable[str] | None = None,
         "counts": {k: len(v) for k, v in bundle.items()},
         "http": dict(fetcher.stats),
         "parse_errors": {k: sum(1 for r in v if r.get("parse_error")) for k, v in bundle.items()},
+        "paused": paused,
     }
 
     if write_json:

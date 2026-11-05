@@ -396,6 +396,35 @@ class MediaRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+class ScheduledJob(Base):
+    """
+    A one-time future trigger for 'scrape' or 'media_migrate', created from
+    the dashboard's Schedule button.
+
+    scheduled_at_utc is the only time value the scheduler loop actually
+    compares against `now()`; timezone_name is kept purely so the original
+    local time the user picked can be displayed back correctly later
+    (DST-safe, since it's resolved fresh via zoneinfo on every read rather
+    than baked into a fixed UTC offset at creation time).
+    """
+
+    __tablename__ = "scheduled_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(20), index=True)  # scrape | media_migrate
+    scheduled_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    timezone_name: Mapped[str] = mapped_column(String(60))  # IANA, e.g. "Asia/Dhaka"
+
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    # scrape only: {"only": [...], "limit": ...}; unused for media_migrate
+    params: Mapped[dict | None] = mapped_column(JsonCol)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_run_id: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 # entity name -> model, used by the ingest and the admin routes
 ENTITY_MODELS: dict[str, type] = {
     "projects": Project,

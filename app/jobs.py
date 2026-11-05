@@ -33,6 +33,23 @@ from scraper.maisondubai import run_scrape
 # start_scrape_job() so a second trigger can't stack a parallel 2,662-page run.
 _run_lock = threading.Lock()
 
+# Set by pause_scrape(); checked by the scraper's inner loop every page.
+# Cleared at the start of every new run so a stale pause can't abort the
+# next one before it even starts.
+_scrape_pause = threading.Event()
+
+
+def pause_scrape() -> bool:
+    """Request the running scrape to stop cleanly. Returns False if none is running."""
+    db = SessionLocal()
+    try:
+        if active_run(db) is None:
+            return False
+    finally:
+        db.close()
+    _scrape_pause.set()
+    return True
+
 
 class GuardTripped(Exception):
     """Raised when the fresh scrape fails a sanity check; nothing is written."""
@@ -165,6 +182,7 @@ def run_scrape_and_ingest(
     full_run = not only and not limit
     db: Session = SessionLocal()
     started = time.time()
+    _scrape_pause.clear()  # a stale pause from a prior run must not fire instantly
 
     try:
         if run_id is None:
@@ -194,8 +212,23 @@ def run_scrape_and_ingest(
             revalidate=settings.scrape_revalidate,
             write_json=True,
             on_progress=_on_progress,
+            should_pause=_scrape_pause.is_set,
         )
         run.progress = None  # scraping finished; nothing left to poll for
+
+        if (bundle.get("meta") or {}).get("paused"):
+            # Nothing is ingested for a paused run -- the partial bundle may
+            # be missing whole entity types, and ingesting it with
+            # delist_missing could wipe out everything not yet re-fetched.
+            # Resuming is just running again; already-fetched pages are
+            # fast via the HTML cache, so nothing here needs to be resumable
+            # at a finer grain than "run it again."
+            run.status = "paused"
+            run.finished_at = utcnow()
+            run.duration_seconds = round(time.time() - started, 1)
+            db.commit()
+            return {"run_id": rid, "status": "paused",
+                    "duration_seconds": run.duration_seconds}
 
         http = (bundle.get("meta") or {}).get("http") or {}
         run.pages_fetched = http.get("net", 0)

@@ -341,12 +341,19 @@ def upload_pending(db: Session, urls: set[str], client: GHLClient,
                     on_progress: Callable[[int, int, int, int], None] | None = None,
                     workers: int = 6,
                     names: dict[str, str] | None = None,
+                    should_pause: Callable[[], bool] | None = None,
                     ) -> dict[str, int]:
     """
     Upload every URL not already recorded as a success. Returns counts.
 
     on_progress(done, total, uploaded, failed) fires every 10 files so the
     dashboard can show live progress over what is a multi-hour job.
+
+    should_pause(), checked after every file, stops consuming further
+    completions and returns with counts["paused"] = True. Every upload up to
+    that point is already committed (one commit per file, not batched), so
+    nothing is lost -- resuming is just running the job again, which skips
+    everything already marked successful.
     """
     existing = {
         row.source_url: row
@@ -359,7 +366,8 @@ def upload_pending(db: Session, urls: set[str], client: GHLClient,
     if limit:
         pending = pending[:limit]
 
-    counts = {"already_cached": len(already_ok), "uploaded": 0, "failed": 0}
+    counts: dict[str, Any] = {"already_cached": len(already_ok), "uploaded": 0,
+                               "failed": 0, "paused": False}
     total = len(pending)
 
     def _fetch(url: str) -> tuple[str, dict | None, str | None]:
@@ -401,6 +409,10 @@ def upload_pending(db: Session, urls: set[str], client: GHLClient,
             # the first 10 files (which, on a slow batch, looks like a hang).
             if on_progress and (idx == 1 or idx % 10 == 0 or idx == total):
                 on_progress(idx, total, counts["uploaded"], counts["failed"])
+
+            if should_pause and should_pause():
+                counts["paused"] = True
+                break
     return counts
 
 

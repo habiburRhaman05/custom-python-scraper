@@ -13,22 +13,26 @@ the VPS IP being blocked.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.jobs import release_lock, run_in_background, start_scrape_job
+from app.jobs import pause_scrape, release_lock, run_in_background, start_scrape_job
 from app.media_jobs import (
+    pause_media,
     release_media_lock,
     run_scan,
     run_upload,
     start_media_scan,
     start_media_upload,
 )
-from app.models import ENTITY_MODELS, MediaRun, ScrapeRun
+from app.models import ENTITY_MODELS, MediaRun, ScheduledJob, ScrapeRun
 from app.routers.common import require_admin
-from app.schemas import MediaRunOut, RunOut, ScrapeAccepted
+from app.scheduler import to_utc
+from app.schemas import MediaRunOut, RunOut, ScheduledJobOut, ScheduleRequest, ScrapeAccepted
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
@@ -108,6 +112,19 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     return RunOut.model_validate(run)
 
 
+@router.post("/scrape/pause", summary="Pause the running scrape (not a reset)")
+def pause_scrape_route():
+    """
+    Stops cleanly after the current in-flight batch and marks the run
+    'paused'. Nothing already fetched is discarded. Resuming is just
+    triggering a scrape again -- already-fetched pages are fast via the
+    HTML cache (or return 304 with revalidation), so it picks up quickly.
+    """
+    if not pause_scrape():
+        raise HTTPException(status.HTTP_409_CONFLICT, "no scrape is currently running")
+    return {"message": "pause requested — the run will stop within the current batch"}
+
+
 # ---------------------------------------------------------------------------
 # Media migration — two-phase: scan (read-only) then explicit approval.
 # ---------------------------------------------------------------------------
@@ -176,3 +193,79 @@ def media_run(run_id: int, db: Session = Depends(get_db)):
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"media run {run_id} not found")
     return MediaRunOut.model_validate(run)
+
+
+@router.post("/media/pause", summary="Pause the running upload (not a reset)")
+def pause_media_route():
+    """
+    Stops cleanly after the current in-flight batch. Every file already
+    uploaded this run is already committed to the ledger, so nothing is
+    lost. Resuming is just scanning and approving again -- already-uploaded
+    files are skipped.
+    """
+    if not pause_media():
+        raise HTTPException(status.HTTP_409_CONFLICT, "no media upload is currently running")
+    return {"message": "pause requested — the upload will stop within the current batch"}
+
+
+# ---------------------------------------------------------------------------
+# Scheduling — one-time future triggers, fired by the background poll loop
+# in app/scheduler.py. A scheduled media_migrate runs unattended (scan then
+# straight to upload, no approval step, since nobody's there to click it).
+# ---------------------------------------------------------------------------
+def _schedule(job_type: str, body: ScheduleRequest, db: Session) -> ScheduledJob:
+    try:
+        local_naive = datetime.strptime(body.scheduled_at, "%Y-%m-%dT%H:%M")
+        scheduled_utc = to_utc(local_naive, body.timezone)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"invalid scheduled_at/timezone: {exc}",
+        )
+    if scheduled_utc <= datetime.now(timezone.utc):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "scheduled_at must be in the future")
+
+    job = ScheduledJob(
+        job_type=job_type, scheduled_at_utc=scheduled_utc, timezone_name=body.timezone,
+        status="pending",
+        params={"only": body.only, "limit": body.limit} if job_type == "scrape" else None,
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+@router.post("/scrape/schedule", response_model=ScheduledJobOut, status_code=status.HTTP_201_CREATED,
+             summary="Schedule a one-time future scrape")
+def schedule_scrape(body: ScheduleRequest, db: Session = Depends(get_db)):
+    return ScheduledJobOut.model_validate(_schedule("scrape", body, db))
+
+
+@router.post("/media/schedule", response_model=ScheduledJobOut, status_code=status.HTTP_201_CREATED,
+             summary="Schedule a one-time future media migration (runs unattended)")
+def schedule_media(body: ScheduleRequest, db: Session = Depends(get_db)):
+    return ScheduledJobOut.model_validate(_schedule("media_migrate", body, db))
+
+
+@router.get("/scheduled-jobs", response_model=list[ScheduledJobOut], summary="Upcoming + past scheduled jobs")
+def list_scheduled_jobs(db: Session = Depends(get_db),
+                        job_type: str | None = Query(None, description="scrape | media_migrate"),
+                        limit: int = Query(50, ge=1, le=200)):
+    stmt = select(ScheduledJob).order_by(desc(ScheduledJob.scheduled_at_utc)).limit(limit)
+    if job_type:
+        stmt = stmt.where(ScheduledJob.job_type == job_type)
+    return [ScheduledJobOut.model_validate(j) for j in db.execute(stmt).scalars()]
+
+
+@router.post("/scheduled-jobs/{job_id}/cancel", response_model=ScheduledJobOut,
+             summary="Cancel a scheduled job before it fires")
+def cancel_scheduled_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(ScheduledJob, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"scheduled job {job_id} not found")
+    if job.status != "pending":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"job is '{job.status}', not pending")
+    job.status = "cancelled"
+    db.commit()
+    return ScheduledJobOut.model_validate(job)

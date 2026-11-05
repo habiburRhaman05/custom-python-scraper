@@ -239,6 +239,26 @@ class MediaRunOut(ORMModel):
     error: str | None = None
 
 
+class ScheduleRequest(BaseModel):
+    scheduled_at: str  # "YYYY-MM-DDTHH:MM", local to `timezone` -- no offset
+    timezone: str  # IANA zone name, e.g. "Asia/Dhaka"
+    only: list[str] | None = None  # scrape only
+    limit: int | None = None  # scrape only
+
+
+class ScheduledJobOut(ORMModel):
+    id: int
+    job_type: str
+    scheduled_at_utc: datetime
+    timezone_name: str
+    status: str
+    params: dict[str, Any] | None = None
+    created_at: datetime
+    fired_at: datetime | None = None
+    result_run_id: int | None = None
+    error: str | None = None
+
+
 class Health(BaseModel):
     status: str
     database: str

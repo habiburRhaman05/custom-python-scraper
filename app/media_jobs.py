@@ -37,7 +37,22 @@ from app.models import MediaRun, utcnow
 # Single-flight, same reasoning as the scrape lock: one long job at a time.
 _media_lock = threading.Lock()
 
+# Set by pause_media(); checked every file during the upload phase.
+_media_pause = threading.Event()
+
 ACTIVE_STATUSES = ("scanning", "uploading")
+
+
+def pause_media() -> bool:
+    """Request the running upload to stop cleanly. Returns False if none is running."""
+    db = SessionLocal()
+    try:
+        if active_media_run(db) is None:
+            return False
+    finally:
+        db.close()
+    _media_pause.set()
+    return True
 
 
 def active_media_run(db: Session) -> MediaRun | None:
@@ -153,6 +168,7 @@ def run_upload(run_id: int, limit: int | None = None) -> None:
     """
     db = SessionLocal()
     started = time.time()
+    _media_pause.clear()  # a stale pause from a prior run must not fire instantly
     try:
         run = db.get(MediaRun, run_id)
         if run is None:
@@ -171,12 +187,17 @@ def run_upload(run_id: int, limit: int | None = None) -> None:
         counts = upload_pending(db, result.unique_urls, client, limit=limit,
                                  on_progress=_upload_progress,
                                  workers=settings.ghl_workers,
-                                 names=result.names)
+                                 names=result.names,
+                                 should_pause=_media_pause.is_set)
 
         def _replace_progress(done: int, total: int) -> None:
             run.progress = {"phase": "replacing", "done": done, "total": total}
             db.commit()
 
+        # Replace runs for whatever succeeded even on a pause -- every URL
+        # it touches is independently correct, so there's no reason to make
+        # already-uploaded files wait for a future "finish the rest" run
+        # before the database reflects them.
         replaced = replace_everywhere(db, on_progress=_replace_progress)
 
         run.uploaded = counts["uploaded"]
@@ -184,7 +205,7 @@ def run_upload(run_id: int, limit: int | None = None) -> None:
         run.rows_updated = replaced["rows_updated"]
         run.fields_updated = replaced["fields_updated"]
         run.progress = None
-        run.status = "success"
+        run.status = "paused" if counts.get("paused") else "success"
         run.finished_at = utcnow()
         run.duration_seconds = round(time.time() - started, 1)
         db.commit()

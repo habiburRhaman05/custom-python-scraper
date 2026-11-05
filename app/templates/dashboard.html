@@ -68,6 +68,12 @@
   .badge.failed  { background: var(--bad-bg); color: var(--bad); }
   .badge.aborted { background: var(--warn-bg); color: var(--warn); }
   .badge.running { background: var(--run-bg); color: var(--run); }
+  .badge.paused  { background: var(--warn-bg); color: var(--warn); }
+  .badge.pending { background: var(--accent-bg); color: var(--accent); }
+  .badge.fired   { background: var(--run-bg); color: var(--run); }
+  .badge.cancelled { background: var(--border); color: var(--muted); }
+  .btn-sm { padding: 6px 10px; font-size: 12px; }
+  .btn-group { display: flex; gap: 6px; align-items: center; }
   details > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
@@ -79,6 +85,19 @@
   .banner.running { background: var(--run-bg); color: var(--run); }
   .banner.success { background: var(--ok-bg); color: var(--ok); }
   .banner.failed, .banner.aborted { background: var(--bad-bg); color: var(--bad); }
+  .banner.paused { background: var(--warn-bg); color: var(--warn); }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal-box { width: 380px; max-width: 90vw; }
+  .modal-box h2 { font-size: 15px; margin: 0 0 4px; text-transform: none; color: var(--text); letter-spacing: 0; }
+  .field-label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }
+  .modal-box input, .modal-box select {
+    width: 100%; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
   .spin {
     width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor;
     border-right-color: transparent; animation: spin .7s linear infinite; flex: none;
@@ -118,8 +137,16 @@
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap">
       <button class="btn-ghost" id="refreshBtn">Refresh</button>
-      <button class="btn-primary" id="triggerBtn">Trigger scrape now</button>
-      <button class="btn-primary" id="mediaBtn">Migrate images to GHL</button>
+      <div class="btn-group">
+        <button class="btn-primary" id="triggerBtn">Trigger scrape now</button>
+        <button class="btn-ghost btn-sm" id="pauseBtn" title="Pause the running scrape">Pause</button>
+        <button class="btn-ghost btn-sm" id="scheduleBtn" title="Schedule a future scrape">Schedule…</button>
+      </div>
+      <div class="btn-group">
+        <button class="btn-primary" id="mediaBtn">Migrate images to GHL</button>
+        <button class="btn-ghost btn-sm" id="pauseMediaBtn" title="Pause the running upload">Pause</button>
+        <button class="btn-ghost btn-sm" id="scheduleMediaBtn" title="Schedule a future migration">Schedule…</button>
+      </div>
       <button class="btn-ghost" id="logoutBtn">Log out</button>
     </div>
   </header>
@@ -190,6 +217,16 @@
     </div>
 
     <div class="panel">
+      <h2>Scheduled jobs</h2>
+      <table>
+        <thead><tr>
+          <th>Type</th><th>Runs at (your time)</th><th>Timezone picked</th><th>Status</th><th>Result</th><th></th>
+        </tr></thead>
+        <tbody id="scheduledJobsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
       <h2>Scrape run history</h2>
       <table>
         <thead><tr>
@@ -212,6 +249,26 @@
   </main>
 </div>
 
+<div id="scheduleOverlay" class="modal-overlay">
+  <div class="modal-box panel">
+    <h2 id="scheduleTitle">Schedule</h2>
+    <p class="muted" id="scheduleSub" style="margin:4px 0 0; font-size:12px"></p>
+    <label class="field-label" for="scheduleWhen">Date &amp; time</label>
+    <input type="datetime-local" id="scheduleWhen" />
+    <label class="field-label" for="scheduleTz">Timezone</label>
+    <select id="scheduleTz"></select>
+    <div id="scheduleLimitWrap">
+      <label class="field-label" for="scheduleLimit">Limit pages (optional — leave blank for a full run)</label>
+      <input type="number" id="scheduleLimit" min="1" placeholder="e.g. 50" />
+    </div>
+    <div class="err" id="scheduleErr"></div>
+    <div style="display:flex; gap:10px; margin-top:14px">
+      <button class="btn-primary" id="scheduleSubmitBtn">Schedule</button>
+      <button class="btn-ghost" id="scheduleCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (() => {
   "use strict";
@@ -232,6 +289,16 @@
     return isNaN(d) ? iso : d.toLocaleString(undefined, {
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
     });
+  }
+
+  // Server datetimes that represent UTC sometimes round-trip without a "Z" or
+  // offset suffix (SQLite drops tzinfo on read; Postgres doesn't). Treat a
+  // bare ISO string with no zone marker as UTC rather than letting the
+  // browser silently interpret it as local time.
+  function fmtDateUtc(iso) {
+    if (!iso) return "—";
+    const hasZone = /[zZ]$|[+-]\d\d:\d\d$/.test(iso);
+    return fmtDate(hasZone ? iso : iso + "Z");
   }
 
   function fmtDur(sec) {
@@ -440,7 +507,7 @@
 
   async function loadAll() {
     try {
-      await Promise.all([loadStats(), loadRuns(), loadChanges()]);
+      await Promise.all([loadStats(), loadRuns(), loadChanges(), loadScheduledJobs()]);
       maybeResumePolling();
       maybeResumeMediaPolling();
     } catch (e) {
@@ -499,6 +566,8 @@
         document.getElementById("triggerBtn").disabled = false;
         const msg = run.status === "success"
           ? `Scrape #${runId} finished in ${fmtDur(run.duration_seconds)}.`
+          : run.status === "paused"
+          ? `Scrape #${runId} paused — nothing lost, resume anytime by triggering again.`
           : `Scrape #${runId} ${run.status}: ${run.error || "see run detail below"}`;
         setBanner(run.status, msg);
         setTimeout(hideBanner, 8000);
@@ -541,6 +610,20 @@
     } catch (e) {
       document.getElementById("triggerBtn").disabled = false;
       alert("Failed to start scrape: " + e.message);
+    }
+  });
+
+  document.getElementById("pauseBtn").addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/admin/scrape/pause", {
+        method: "POST",
+        headers: { "X-API-Key": sessionStorage.getItem(KEY_STORAGE) || "" },
+      });
+      const body = await res.json();
+      if (res.status === 409) { alert(body.detail || "No scrape is currently running."); return; }
+      if (!res.ok) throw new Error(JSON.stringify(body));
+    } catch (e) {
+      alert("Failed to pause: " + e.message);
     }
   });
 
@@ -640,8 +723,10 @@
         const msg = run.status === "success"
           ? `Media migration finished — ${fmtNum(run.uploaded)} uploaded, ${fmtNum(run.failed)} failed, `
             + `${fmtNum(run.fields_updated)} field(s) updated in ${fmtDur(run.duration_seconds)}.`
+          : run.status === "paused"
+          ? `Media migration paused — ${fmtNum(run.uploaded)} uploaded so far, nothing lost. Resume anytime.`
           : `Media migration ${run.status}: ${run.error || "see history"}`;
-        setMediaBanner(run.status === "success" ? "success" : "failed", msg);
+        setMediaBanner(run.status === "success" ? "success" : run.status === "paused" ? "paused" : "failed", msg);
         setTimeout(hideMediaBanner, 12000);
         loadAll();
       }
@@ -700,6 +785,20 @@
     currentMediaRunId = null;
   });
 
+  document.getElementById("pauseMediaBtn").addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/admin/media/pause", {
+        method: "POST",
+        headers: { "X-API-Key": sessionStorage.getItem(KEY_STORAGE) || "" },
+      });
+      const body = await res.json();
+      if (res.status === 409) { alert(body.detail || "No media upload is currently running."); return; }
+      if (!res.ok) throw new Error(JSON.stringify(body));
+    } catch (e) {
+      alert("Failed to pause: " + e.message);
+    }
+  });
+
   async function maybeResumeMediaPolling() {
     try {
       const runs = await api("/api/admin/media/runs", { auth: true, params: { limit: 1 } });
@@ -714,7 +813,129 @@
     } catch {}
   }
 
+  // --- scheduling --------------------------------------------------------
+  let scheduleJobType = null;
+
+  function populateTimezones() {
+    const sel = document.getElementById("scheduleTz");
+    let zones;
+    try { zones = Intl.supportedValuesOf("timeZone"); } catch { zones = null; }
+    if (!zones || !zones.length) {
+      zones = [
+        "UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+        "Europe/London", "Europe/Paris", "Europe/Berlin", "Asia/Dubai", "Asia/Kolkata",
+        "Asia/Dhaka", "Asia/Singapore", "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney",
+      ];
+    }
+    const detected = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    if (!zones.includes(detected)) zones = [detected, ...zones];
+    sel.innerHTML = zones.map(z =>
+      `<option value="${h(z)}" ${z === detected ? "selected" : ""}>${h(z)}</option>`
+    ).join("");
+  }
+
+  function openSchedule(jobType) {
+    scheduleJobType = jobType;
+    document.getElementById("scheduleTitle").textContent =
+      jobType === "scrape" ? "Schedule a scrape" : "Schedule a media migration";
+    document.getElementById("scheduleSub").textContent =
+      jobType === "scrape"
+        ? "Runs once at the chosen time, in the chosen timezone."
+        : "Runs unattended — scans then uploads straight away, no approval step.";
+    document.getElementById("scheduleLimitWrap").style.display = jobType === "scrape" ? "block" : "none";
+    document.getElementById("scheduleErr").textContent = "";
+
+    const d = new Date(Date.now() + 60 * 60 * 1000); // default: 1 hour from now
+    d.setSeconds(0, 0);
+    const pad = n => String(n).padStart(2, "0");
+    document.getElementById("scheduleWhen").value =
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    document.getElementById("scheduleLimit").value = "";
+
+    document.getElementById("scheduleOverlay").classList.add("show");
+  }
+
+  function closeSchedule() {
+    document.getElementById("scheduleOverlay").classList.remove("show");
+  }
+
+  document.getElementById("scheduleBtn").addEventListener("click", () => openSchedule("scrape"));
+  document.getElementById("scheduleMediaBtn").addEventListener("click", () => openSchedule("media_migrate"));
+  document.getElementById("scheduleCancelBtn").addEventListener("click", closeSchedule);
+
+  document.getElementById("scheduleSubmitBtn").addEventListener("click", async () => {
+    const when = document.getElementById("scheduleWhen").value;
+    const tz = document.getElementById("scheduleTz").value;
+    const errEl = document.getElementById("scheduleErr");
+    errEl.textContent = "";
+    if (!when) { errEl.textContent = "Pick a date and time."; return; }
+
+    const payload = { scheduled_at: when, timezone: tz };
+    if (scheduleJobType === "scrape") {
+      const limit = document.getElementById("scheduleLimit").value;
+      if (limit) payload.limit = Number(limit);
+    }
+    const path = scheduleJobType === "scrape" ? "/api/admin/scrape/schedule" : "/api/admin/media/schedule";
+
+    document.getElementById("scheduleSubmitBtn").disabled = true;
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: {
+          "X-API-Key": sessionStorage.getItem(KEY_STORAGE) || "",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        throw new Error(typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail || body));
+      }
+      closeSchedule();
+      loadScheduledJobs();
+    } catch (e) {
+      errEl.textContent = e.message;
+    } finally {
+      document.getElementById("scheduleSubmitBtn").disabled = false;
+    }
+  });
+
+  async function loadScheduledJobs() {
+    let jobs;
+    try { jobs = await api("/api/admin/scheduled-jobs", { auth: true, params: { limit: 50 } }); }
+    catch { return; }
+    const body = document.getElementById("scheduledJobsBody");
+    if (!jobs.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">No scheduled jobs yet — use Schedule… above.</td></tr>';
+      return;
+    }
+    body.innerHTML = jobs.map(j => `
+      <tr>
+        <td>${h(j.job_type === "scrape" ? "Scrape" : "Media migration")}</td>
+        <td>${fmtDateUtc(j.scheduled_at_utc)}</td>
+        <td class="muted">${h(j.timezone_name)}</td>
+        <td><span class="badge ${h(j.status)}">${h(j.status)}</span></td>
+        <td class="muted">${j.result_run_id ? `run #${j.result_run_id}` : (j.error ? h(j.error) : "—")}</td>
+        <td>${j.status === "pending"
+          ? `<button class="btn-ghost btn-sm cancel-sched-btn" data-id="${j.id}">Cancel</button>`
+          : ""}</td>
+      </tr>
+    `).join("");
+    body.querySelectorAll(".cancel-sched-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Cancel this scheduled job?")) return;
+        try {
+          await api(`/api/admin/scheduled-jobs/${btn.dataset.id}/cancel`, { auth: true, method: "POST" });
+          loadScheduledJobs();
+        } catch (e) {
+          alert("Failed to cancel: " + e.message);
+        }
+      });
+    });
+  }
+
   // --- boot --------------------------------------------------------
+  populateTimezones();
   (async () => {
     const saved = sessionStorage.getItem(KEY_STORAGE);
     if (!saved) { showGate(""); return; }
