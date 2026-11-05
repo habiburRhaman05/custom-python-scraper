@@ -70,6 +70,8 @@ class ProjectDetail(ProjectSummary, Lifecycle):
     service_charge: str | None = None
     furnishing: str | None = None
     post_handover_plan: str | None = None
+    brochure_url: str | None = None
+    floor_plan_url: str | None = None
     price_usd_approx: str | None = None
     unit_types: list[Any] | None = None
     payment_plans: list[Any] | None = None
@@ -202,6 +204,7 @@ class RunOut(ORMModel):
     pages_not_modified: int = 0
     pages_from_cache: int = 0
     pages_failed: int = 0
+    progress: dict[str, Any] | None = None
     counts: dict[str, Any] | None = None
     validation: dict[str, Any] | None = None
     error: str | None = None

@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     guard_max_coverage_drop: float = 30.0
     guard_max_delist_ratio: float = 0.2
 
+    # GoHighLevel media mirroring (app/media_migration.py) -- optional, only
+    # needed if you run `python -m app.cli migrate-media`
+    ghl_pit_token: str = ""
+    ghl_location_id: str = ""
+    ghl_parent_folder_id: str = ""  # optional: upload into a specific media folder
+    ghl_rate_limit_per_sec: float = 4.0
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a list. `*` is passed through as the wildcard."""

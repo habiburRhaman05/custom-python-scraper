@@ -126,7 +126,12 @@
   <main>
     <div id="scrapeBanner" class="banner running">
       <div class="spin"></div>
-      <span id="scrapeBannerText"></span>
+      <div style="flex:1; min-width:0">
+        <span id="scrapeBannerText"></span>
+        <div id="scrapeProgressTrack" class="bar-track" style="display:none; margin-top:6px">
+          <div id="scrapeProgressFill" class="bar-fill" style="width:0%"></div>
+        </div>
+      </div>
     </div>
 
     <div class="panel">
@@ -409,12 +414,21 @@
   }
 
   // --- trigger + polling --------------------------------------------------------
-  function setBanner(status, text) {
+  function setBanner(status, text, percent) {
     const b = document.getElementById("scrapeBanner");
     b.className = `banner show ${status}`;
     document.getElementById("scrapeBannerText").textContent = text;
     const spinner = b.querySelector(".spin");
     if (spinner) spinner.style.display = status === "running" ? "block" : "none";
+
+    const track = document.getElementById("scrapeProgressTrack");
+    const fill = document.getElementById("scrapeProgressFill");
+    if (typeof percent === "number") {
+      track.style.display = "block";
+      fill.style.width = `${Math.min(100, Math.max(0, percent)).toFixed(1)}%`;
+    } else {
+      track.style.display = "none";
+    }
   }
 
   function hideBanner() {
@@ -434,7 +448,16 @@
       catch { return; }
       const elapsed = Math.round((Date.now() - started) / 1000);
       if (run.status === "running") {
-        setBanner("running", `Scrape #${runId} running… ${elapsed}s elapsed`);
+        const p = run.progress;
+        if (p && p.overall_total) {
+          const pct = p.overall_done / p.overall_total * 100;
+          const text = `Scrape #${runId} — ${h(p.stage)}: ${fmtNum(p.stage_done)}/${fmtNum(p.stage_total)} `
+            + `· overall ${fmtNum(p.overall_done)}/${fmtNum(p.overall_total)} (${pct.toFixed(0)}%) `
+            + `· ${elapsed}s elapsed`;
+          setBanner("running", text, pct);
+        } else {
+          setBanner("running", `Scrape #${runId} starting… ${elapsed}s elapsed`, 0);
+        }
         document.getElementById("triggerBtn").disabled = true;
       } else {
         stopPolling();

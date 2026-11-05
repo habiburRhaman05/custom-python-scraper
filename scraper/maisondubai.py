@@ -54,7 +54,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 
@@ -584,6 +584,31 @@ def gallery(html: str, soup: BeautifulSoup) -> list[dict]:
     return imgs
 
 
+def project_documents(soup: BeautifulSoup) -> dict[str, str | None]:
+    """
+    Brochure + floor-plan PDF links.
+
+    Every project renders both as plain <a href="....pdf"> links: a compact
+    header "Brochure" button (icon + the word "Brochure"), a larger
+    "Download brochure (PDF)" button further down, and a "Floor plan -
+    <name>.pdf" link in the facts panel. The brochure link is duplicated
+    (same URL, two buttons) -- the "brochure" label text is what tells the
+    two document types apart; neither project publishes both without that
+    distinguishing text. Either can be absent on a project that hasn't
+    published that asset yet.
+    """
+    brochure_url = None
+    floor_plan_url = None
+    for a in soup.select('a[href*=".pdf"]'):
+        href = urljoin(BASE, a["href"])
+        label = a.get_text(" ", strip=True)
+        if re.search(r"brochure", label, re.I):
+            brochure_url = brochure_url or href
+        elif floor_plan_url is None:
+            floor_plan_url = href
+    return {"brochure_url": brochure_url, "floor_plan_url": floor_plan_url}
+
+
 def sections(soup: BeautifulSoup) -> list[dict]:
     """Heading -> prose, for the long-form About / location / infrastructure copy."""
     out = []
@@ -795,6 +820,7 @@ def parse_project(url: str, html: str) -> dict:
         "sections": sections(soup),
         "faqs": faqs(ld, html),
         "gallery": gallery(html, soup),
+        **project_documents(soup),
         "address": {
             "locality": clean(addr.get("addressLocality")) or None,
             "region": clean(addr.get("addressRegion")) or None,
@@ -1088,7 +1114,13 @@ PARSERS = {
 }
 
 
-def scrape_group(kind: str, urls: list[str], fetcher: Fetcher, workers: int) -> list[dict]:
+def scrape_group(kind: str, urls: list[str], fetcher: Fetcher, workers: int,
+                  on_progress: Callable[[str, int, int], None] | None = None) -> list[dict]:
+    """
+    on_progress(kind, done, total) fires every 25 pages (same cadence as the
+    console print) -- the job runner uses this to persist live progress to
+    the database so a polling UI can show real numbers, not just a spinner.
+    """
     parser = PARSERS[kind]
     results: list[dict] = []
     done = 0
@@ -1114,6 +1146,8 @@ def scrape_group(kind: str, urls: list[str], fetcher: Fetcher, workers: int) -> 
                     pct = done * 100 // max(total, 1)
                     print(f"\r  {kind:<12} {done}/{total} ({pct}%)  ok={len(results)}",
                           end="", flush=True)
+                    if on_progress:
+                        on_progress(kind, done, total)
     print()
     return results
 
@@ -1121,12 +1155,19 @@ def scrape_group(kind: str, urls: list[str], fetcher: Fetcher, workers: int) -> 
 def run_scrape(out: str = "output", only: Iterable[str] | None = None,
                limit: int | None = None, workers: int = 6, delay: float = 0.3,
                cache_dir: str | None = ".cache_maisondubai",
-               revalidate: bool = False, write_json: bool = True) -> dict[str, Any]:
+               revalidate: bool = False, write_json: bool = True,
+               on_progress: Callable[[dict], None] | None = None) -> dict[str, Any]:
     """
     Scrape and return {"meta":…, "cross_reference":…, <entity>: [records]}.
 
     This is the importable entry point -- the backend's scheduled job calls it
     directly instead of shelling out, so it can ingest the records in-process.
+
+    on_progress, if given, is called every ~25 pages with a dict:
+        {"stage": "projects", "stage_done": 1245, "stage_total": 2021,
+         "overall_done": 1245, "overall_total": 2662}
+    The job runner persists this to the ScrapeRun row so a polling UI shows
+    real numbers instead of just an elapsed-time spinner.
     """
     os.makedirs(out, exist_ok=True)
     fetcher = Fetcher(cache_dir, delay=delay, revalidate=revalidate)
@@ -1140,21 +1181,38 @@ def run_scrape(out: str = "output", only: Iterable[str] | None = None,
 
     wanted = set(only) if only else set(PARSERS) | {"listings"}
     bundle: dict[str, Any] = {}
+    order = ("projects", "developers", "areas", "brokers", "learn", "pages")
 
-    print("\n[2/3] scraping")
-    for kind in ("projects", "developers", "areas", "brokers", "learn", "pages"):
+    # Resolve every kind's URL list up front (post --limit) so the overall
+    # total is known before scraping starts, not guessed mid-run.
+    planned: dict[str, list[str]] = {}
+    for kind in order:
         if kind not in wanted:
             continue
         urls = groups.get(kind, [])
         if kind == "pages":
-            # the 'pages' sitemap holds the static marketing pages
             urls = [u for u in urls if urlparse(u).path not in ("", "/")] or urls
         if limit:
             urls = urls[:limit]
+        planned[kind] = urls
+    overall_total = sum(len(u) for u in planned.values())
+    overall_done = 0
+
+    print("\n[2/3] scraping")
+    for kind, urls in planned.items():
         if not urls:
             print(f"  {kind:<12} (none)")
             continue
-        bundle[kind] = scrape_group(kind, urls, fetcher, workers)
+
+        def _cb(k: str, done: int, total: int, _prior: int = overall_done) -> None:
+            if on_progress:
+                on_progress({
+                    "stage": k, "stage_done": done, "stage_total": total,
+                    "overall_done": _prior + done, "overall_total": overall_total,
+                })
+
+        bundle[kind] = scrape_group(kind, urls, fetcher, workers, on_progress=_cb)
+        overall_done += len(urls)
 
     if "listings" in wanted:
         html = fetcher.get(f"{BASE}/listings")

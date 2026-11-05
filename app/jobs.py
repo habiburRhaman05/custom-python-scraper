@@ -177,6 +177,13 @@ def run_scrape_and_ingest(
                 raise RuntimeError(f"run {run_id} not found")
         rid = run.id
 
+        def _on_progress(p: dict) -> None:
+            # Fires on the same thread running this function (ex.map() is
+            # consumed synchronously), so reusing `db`/`run` here is safe --
+            # nothing else touches this session concurrently.
+            run.progress = p
+            db.commit()
+
         bundle = run_scrape(
             out=settings.scrape_output_dir,
             only=only,
@@ -186,7 +193,9 @@ def run_scrape_and_ingest(
             cache_dir=settings.scrape_cache_dir,
             revalidate=settings.scrape_revalidate,
             write_json=True,
+            on_progress=_on_progress,
         )
+        run.progress = None  # scraping finished; nothing left to poll for
 
         http = (bundle.get("meta") or {}).get("http") or {}
         run.pages_fetched = http.get("net", 0)

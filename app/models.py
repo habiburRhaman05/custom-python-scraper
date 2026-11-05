@@ -111,6 +111,8 @@ class Project(LifecycleMixin, Base):
     service_charge: Mapped[str | None] = mapped_column(String(255))
     furnishing: Mapped[str | None] = mapped_column(Text)
     post_handover_plan: Mapped[str | None] = mapped_column(String(100))
+    brochure_url: Mapped[str | None] = mapped_column(Text)
+    floor_plan_url: Mapped[str | None] = mapped_column(Text)
 
     # nested payloads
     unit_types: Mapped[list | None] = mapped_column(JsonCol)
@@ -272,6 +274,12 @@ class ScrapeRun(Base):
     pages_from_cache: Mapped[int] = mapped_column(Integer, default=0)
     pages_failed: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Live progress while status='running': {"stage": "projects", "stage_done": 1245,
+    # "stage_total": 2021, "overall_done": 1245, "overall_total": 2662}. Updated
+    # every ~25 pages by the scraper's on_progress callback -- this is what lets
+    # a polling dashboard show real numbers instead of just elapsed time.
+    progress: Mapped[dict | None] = mapped_column(JsonCol)
+
     # {"projects": {"created": 3, "updated": 1, "unchanged": 2017, "delisted": 0}, ...}
     counts: Mapped[dict | None] = mapped_column(JsonCol)
     # safety-rail results — populated whether or not they tripped
@@ -317,6 +325,30 @@ class RecordChange(Base):
     run: Mapped[ScrapeRun] = relationship(back_populates="changes")
 
     __table_args__ = (Index("ix_record_changes_entity_slug", "entity", "slug"),)
+
+
+class MediaMigration(Base):
+    """
+    One row per distinct source media URL mirrored to GoHighLevel.
+
+    This is the dedup + resume ledger for app/media_migration.py: a source
+    URL already present here with status='success' is never re-uploaded,
+    so the migration script is safe to re-run (new scrapes bring new URLs;
+    old ones are skipped).
+    """
+
+    __tablename__ = "media_migrations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_url: Mapped[str] = mapped_column(Text, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)  # success | failed
+    ghl_file_id: Mapped[str | None] = mapped_column(String(100))
+    ghl_url: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 # entity name -> model, used by the ingest and the admin routes

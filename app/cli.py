@@ -6,6 +6,7 @@ Command line entrypoint — `python -m app.cli <command>`.
     runs        show recent run history
     initdb      create tables directly (use alembic in production)
     stats       quick counts straight from the database
+    migrate-media   mirror Reelly/S3 media into GoHighLevel (dry-run by default)
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from app.config import settings
 from app.db import Base, SessionLocal, engine
 from app.ingest import ingest_bundle
 from app.jobs import run_scrape_and_ingest, validate_bundle
+from app.media_migration import build_client, replace_everywhere, scan, upload_pending
 from app.models import ENTITY_MODELS, Project, ScrapeRun, utcnow
 
 
@@ -122,6 +124,45 @@ def cmd_stats(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_migrate_media(args: argparse.Namespace) -> int:
+    db = SessionLocal()
+    try:
+        print("scanning every table/column for Reelly/S3 media URLs...")
+        result = scan(db)
+        print(f"\n  {len(result.unique_urls)} distinct URL(s), "
+              f"{result.occurrences} occurrence(s) across:")
+        for table, count in sorted(result.by_table.items(), key=lambda kv: -kv[1]):
+            print(f"    {table:<12} {count}")
+
+        if not args.apply:
+            print("\nDRY RUN -- nothing uploaded, nothing written.")
+            print("Re-run with --apply to upload to GoHighLevel and replace the URLs.")
+            return 0
+
+        if not result.unique_urls:
+            print("\nnothing to upload.")
+            return 0
+
+        client = build_client()
+        print(f"\nuploading (rate limit: {settings.ghl_rate_limit_per_sec}/s)...")
+        upload_counts = upload_pending(db, result.unique_urls, client, limit=args.limit)
+        print(f"  already cached: {upload_counts['already_cached']}")
+        print(f"  uploaded:       {upload_counts['uploaded']}")
+        print(f"  failed:         {upload_counts['failed']}")
+
+        print("\nreplacing URLs in the database (uploaded ones only)...")
+        replace_counts = replace_everywhere(db)
+        print(f"  rows updated:   {replace_counts['rows_updated']}")
+        print(f"  fields updated: {replace_counts['fields_updated']}")
+
+        if upload_counts["failed"]:
+            print(f"\n{upload_counts['failed']} URL(s) failed and were left untouched "
+                  f"(original URL still in the DB) -- re-run to retry just those.")
+        return 0
+    finally:
+        db.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="python -m app.cli")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -149,6 +190,13 @@ def main() -> int:
 
     t = sub.add_parser("stats", help="row counts from the database")
     t.set_defaults(func=cmd_stats)
+
+    m = sub.add_parser("migrate-media",
+                        help="mirror Reelly/S3 media into GoHighLevel (dry-run by default)")
+    m.add_argument("--apply", action="store_true",
+                    help="actually upload and rewrite the DB (default: scan + report only)")
+    m.add_argument("--limit", type=int, help="upload at most N URLs this run (for testing)")
+    m.set_defaults(func=cmd_migrate_media)
 
     args = ap.parse_args()
     return args.func(args)

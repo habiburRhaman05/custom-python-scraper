@@ -154,6 +154,8 @@ def map_project(r: dict) -> dict:
         "service_charge": r.get("service_charge"),
         "furnishing": r.get("furnishing"),
         "post_handover_plan": r.get("post_handover_plan"),
+        "brochure_url": r.get("brochure_url"),
+        "floor_plan_url": r.get("floor_plan_url"),
         "unit_types": r.get("unit_types"),
         "payment_plans": r.get("payment_plans"),
         "amenities": r.get("amenities"),
