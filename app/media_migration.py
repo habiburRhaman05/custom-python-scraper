@@ -141,32 +141,45 @@ class GHLClient:
             time.sleep(wait)
         self._last_call = time.monotonic()
 
+    MAX_BYTES = 24 * 1024 * 1024  # GHL's own cap is 25MB for non-video files
+
     def upload_from_url(self, source_url: str, *, name: str | None = None,
                          retries: int = 3) -> dict:
         """
-        hosted=true + fileUrl=<source_url>: GHL fetches the bytes itself --
-        we never download the file through our own process.
-        """
-        fields = {
-            "hosted": "true",
-            "fileUrl": source_url,
-            "locationId": self.location_id,
-        }
-        if name:
-            fields["name"] = name[:120]
-        if self.parent_folder_id:
-            fields["parentId"] = self.parent_folder_id
-        # GHL's upload endpoint requires multipart/form-data even when every
-        # field is a plain string -- requests only sends that encoding when
-        # `files=` is used, so each field is wrapped as a (filename=None) part.
-        multipart = {k: (None, v) for k, v in fields.items()}
+        Downloads the file ourselves, then uploads the actual bytes.
 
+        hosted=true + fileUrl=<source_url> looked like it should let GHL fetch
+        the file server-side, but verified empirically (GET /medias/files)
+        that it does NOT: the stored entry has hosted=true, bucketName="",
+        and its url is just an echo of the source -- no copy is ever made.
+        A genuine independent copy only exists for entries with
+        hosted=false, bucketName="msgsndr", url on assets.cdn.filesafe.space
+        -- which this real multipart file upload produces.
+        """
         last_exc: Exception | None = None
         for attempt in range(retries):
+            try:
+                dl = requests.get(source_url, timeout=60, stream=True)
+                dl.raise_for_status()
+                content = dl.content
+            except requests.RequestException as exc:
+                last_exc = exc
+                time.sleep(2 ** attempt)
+                continue
+            if len(content) > self.MAX_BYTES:
+                raise GHLError(f"{len(content)} bytes exceeds GHL's {self.MAX_BYTES}-byte limit")
+            content_type = dl.headers.get("Content-Type") or "application/octet-stream"
+            filename = (name or source_url.rsplit("/", 1)[-1].split("?", 1)[0] or "file")[:120]
+
+            fields: dict[str, Any] = {"locationId": (None, self.location_id)}
+            if self.parent_folder_id:
+                fields["parentId"] = (None, self.parent_folder_id)
+            fields["file"] = (filename, content, content_type)
+
             self._throttle()
             try:
                 resp = self.session.post(
-                    f"{GHL_API_BASE}/medias/upload-file", files=multipart, timeout=60
+                    f"{GHL_API_BASE}/medias/upload-file", files=fields, timeout=120
                 )
             except requests.RequestException as exc:
                 last_exc = exc
