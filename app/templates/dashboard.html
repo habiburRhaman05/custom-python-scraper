@@ -116,9 +116,10 @@
       <h1>maisondubai data — dashboard</h1>
       <div class="sub" id="lastRun">loading…</div>
     </div>
-    <div style="display:flex; gap:10px">
+    <div style="display:flex; gap:10px; flex-wrap:wrap">
       <button class="btn-ghost" id="refreshBtn">Refresh</button>
       <button class="btn-primary" id="triggerBtn">Trigger scrape now</button>
+      <button class="btn-primary" id="mediaBtn">Migrate images to GHL</button>
       <button class="btn-ghost" id="logoutBtn">Log out</button>
     </div>
   </header>
@@ -131,6 +132,39 @@
         <div id="scrapeProgressTrack" class="bar-track" style="display:none; margin-top:6px">
           <div id="scrapeProgressFill" class="bar-fill" style="width:0%"></div>
         </div>
+      </div>
+    </div>
+
+    <div id="mediaBanner" class="banner running">
+      <div class="spin"></div>
+      <div style="flex:1; min-width:0">
+        <span id="mediaBannerText"></span>
+        <div id="mediaProgressTrack" class="bar-track" style="display:none; margin-top:6px">
+          <div id="mediaProgressFill" class="bar-fill" style="width:0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Approval gate: shown after a scan, before anything is uploaded. -->
+    <div id="mediaApproval" class="panel" style="display:none; border-color:var(--accent)">
+      <h2>Media migration — review before uploading</h2>
+      <div class="kpis" id="mediaApprovalKpis"></div>
+      <div style="margin-top:14px">
+        <div class="muted" style="font-size:12px; margin-bottom:6px">Found in:</div>
+        <div id="mediaApprovalTables"></div>
+      </div>
+      <details style="margin-top:12px">
+        <summary>Example URLs that will be replaced</summary>
+        <div class="mono" id="mediaApprovalSamples" style="margin-top:8px; word-break:break-all"></div>
+      </details>
+      <p class="muted" style="margin:14px 0 0; font-size:13px">
+        Approving downloads each file, uploads it to your GoHighLevel media library,
+        then replaces the URL in the database. Files already uploaded are skipped.
+        This can take a few hours — you can close this page, it keeps running.
+      </p>
+      <div style="display:flex; gap:10px; margin-top:14px">
+        <button class="btn-primary" id="mediaApproveBtn">Yes, upload to GHL</button>
+        <button class="btn-ghost" id="mediaCancelBtn">Cancel</button>
       </div>
     </div>
 
@@ -408,6 +442,7 @@
     try {
       await Promise.all([loadStats(), loadRuns(), loadChanges()]);
       maybeResumePolling();
+      maybeResumeMediaPolling();
     } catch (e) {
       if (String(e.message) !== "unauthorized") console.error(e);
     }
@@ -510,6 +545,174 @@
   });
 
   document.getElementById("refreshBtn").addEventListener("click", loadAll);
+
+  // --- media migration (scan -> approve -> upload) ----------------------
+  let mediaPollHandle = null;
+  let currentMediaRunId = null;
+
+  function setMediaBanner(status, text, percent) {
+    const b = document.getElementById("mediaBanner");
+    b.className = `banner show ${status}`;
+    document.getElementById("mediaBannerText").textContent = text;
+    const spinner = b.querySelector(".spin");
+    if (spinner) spinner.style.display = status === "running" ? "block" : "none";
+
+    const track = document.getElementById("mediaProgressTrack");
+    const fill = document.getElementById("mediaProgressFill");
+    if (typeof percent === "number") {
+      track.style.display = "block";
+      fill.style.width = `${Math.min(100, Math.max(0, percent)).toFixed(1)}%`;
+    } else {
+      track.style.display = "none";
+    }
+  }
+
+  function hideMediaBanner() {
+    document.getElementById("mediaBanner").classList.remove("show");
+  }
+
+  function stopMediaPolling() {
+    if (mediaPollHandle) { clearInterval(mediaPollHandle); mediaPollHandle = null; }
+  }
+
+  function showApproval(run) {
+    currentMediaRunId = run.id;
+    const kpis = [
+      ["Images found", fmtNum(run.scan_total_urls)],
+      ["Will upload", fmtNum(run.scan_pending)],
+      ["Already done", fmtNum(run.scan_already_migrated)],
+      ["Places used", fmtNum(run.scan_occurrences)],
+    ];
+    document.getElementById("mediaApprovalKpis").innerHTML = kpis.map(([l, v]) => `
+      <div class="kpi"><div class="v">${h(v)}</div><div class="l">${h(l)}</div></div>
+    `).join("");
+
+    const tables = Object.entries(run.scan_by_table || {});
+    document.getElementById("mediaApprovalTables").innerHTML = tables.length
+      ? tables.map(([t, n]) => `<div class="bar-row"><span>${h(t)}</span><span class="muted">${fmtNum(n)}</span></div>`).join("")
+      : '<div class="empty">none</div>';
+
+    document.getElementById("mediaApprovalSamples").innerHTML =
+      (run.scan_samples || []).map(u => `<div>${h(u)}</div>`).join("") || "none";
+
+    document.getElementById("mediaApproval").style.display = "block";
+  }
+
+  function hideApproval() {
+    document.getElementById("mediaApproval").style.display = "none";
+  }
+
+  function pollMediaRun(runId) {
+    stopMediaPolling();
+    const started = Date.now();
+    const tick = async () => {
+      let run;
+      try { run = await api(`/api/admin/media/runs/${runId}`, { auth: true }); }
+      catch { return; }
+      const elapsed = Math.round((Date.now() - started) / 1000);
+
+      if (run.status === "scanning") {
+        setMediaBanner("running", `Scanning the database for images… ${elapsed}s`);
+        document.getElementById("mediaBtn").disabled = true;
+      } else if (run.status === "awaiting_approval") {
+        stopMediaPolling();
+        document.getElementById("mediaBtn").disabled = false;
+        setMediaBanner("success", `Scan complete — ${fmtNum(run.scan_pending)} image(s) ready to upload. Review below.`);
+        showApproval(run);
+      } else if (run.status === "uploading") {
+        hideApproval();
+        document.getElementById("mediaBtn").disabled = true;
+        const p = run.progress;
+        if (p && p.total) {
+          const pct = p.done / p.total * 100;
+          const text = p.phase === "replacing"
+            ? `Replacing URLs in the database — table ${p.done}/${p.total}`
+            : `Uploading to GHL — ${fmtNum(p.done)}/${fmtNum(p.total)} (${pct.toFixed(0)}%)`
+              + ` · ${fmtNum(p.uploaded)} ok, ${fmtNum(p.failed)} failed · ${elapsed}s`;
+          setMediaBanner("running", text, pct);
+        } else {
+          setMediaBanner("running", `Starting upload… ${elapsed}s`, 0);
+        }
+      } else {
+        stopMediaPolling();
+        hideApproval();
+        document.getElementById("mediaBtn").disabled = false;
+        const msg = run.status === "success"
+          ? `Media migration finished — ${fmtNum(run.uploaded)} uploaded, ${fmtNum(run.failed)} failed, `
+            + `${fmtNum(run.fields_updated)} field(s) updated in ${fmtDur(run.duration_seconds)}.`
+          : `Media migration ${run.status}: ${run.error || "see history"}`;
+        setMediaBanner(run.status === "success" ? "success" : "failed", msg);
+        setTimeout(hideMediaBanner, 12000);
+        loadAll();
+      }
+    };
+    tick();
+    mediaPollHandle = setInterval(tick, 3000);
+  }
+
+  document.getElementById("mediaBtn").addEventListener("click", async () => {
+    document.getElementById("mediaBtn").disabled = true;
+    hideApproval();
+    try {
+      const res = await fetch("/api/admin/media/scan", {
+        method: "POST",
+        headers: { "X-API-Key": sessionStorage.getItem(KEY_STORAGE) || "" },
+      });
+      const body = await res.json();
+      if (res.status === 409) {
+        setMediaBanner("running", `A media job is already running (#${body.detail?.run_id ?? "?"}).`);
+        if (body.detail?.run_id) pollMediaRun(body.detail.run_id);
+        return;
+      }
+      if (!res.ok) throw new Error(JSON.stringify(body));
+      setMediaBanner("running", "Scanning the database for images…");
+      pollMediaRun(body.id);
+    } catch (e) {
+      document.getElementById("mediaBtn").disabled = false;
+      alert("Failed to start media scan: " + e.message);
+    }
+  });
+
+  document.getElementById("mediaApproveBtn").addEventListener("click", async () => {
+    if (!currentMediaRunId) return;
+    if (!confirm("Upload every image to GoHighLevel and replace the URLs in the database?\n\nThis can take a few hours.")) return;
+    document.getElementById("mediaApproveBtn").disabled = true;
+    try {
+      const res = await fetch(`/api/admin/media/runs/${currentMediaRunId}/approve`, {
+        method: "POST",
+        headers: { "X-API-Key": sessionStorage.getItem(KEY_STORAGE) || "" },
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(body));
+      hideApproval();
+      setMediaBanner("running", "Upload started…", 0);
+      pollMediaRun(currentMediaRunId);
+    } catch (e) {
+      alert("Failed to start upload: " + e.message);
+    } finally {
+      document.getElementById("mediaApproveBtn").disabled = false;
+    }
+  });
+
+  document.getElementById("mediaCancelBtn").addEventListener("click", () => {
+    hideApproval();
+    hideMediaBanner();
+    currentMediaRunId = null;
+  });
+
+  async function maybeResumeMediaPolling() {
+    try {
+      const runs = await api("/api/admin/media/runs", { auth: true, params: { limit: 1 } });
+      if (!runs.length) return;
+      const run = runs[0];
+      if (run.status === "scanning" || run.status === "uploading") {
+        pollMediaRun(run.id);
+      } else if (run.status === "awaiting_approval") {
+        showApproval(run);
+        setMediaBanner("success", `Scan complete — ${fmtNum(run.scan_pending)} image(s) ready to upload.`);
+      }
+    } catch {}
+  }
 
   // --- boot --------------------------------------------------------
   (async () => {

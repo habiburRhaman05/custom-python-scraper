@@ -351,6 +351,51 @@ class MediaMigration(Base):
     )
 
 
+class MediaRun(Base):
+    """
+    One row per media-migration job triggered from the dashboard.
+
+    Deliberately two-phase so nothing is uploaded without a human saying yes:
+      scanning          -> counting what would change (read-only)
+      awaiting_approval -> scan finished; results shown to the user
+      uploading         -> approved; downloading + uploading + rewriting URLs
+      success/failed/cancelled
+
+    `progress` mirrors ScrapeRun.progress so the dashboard can render the
+    same style of live progress bar.
+    """
+
+    __tablename__ = "media_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trigger: Mapped[str] = mapped_column(String(20))  # api | cli
+    status: Mapped[str] = mapped_column(String(25), index=True)
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+
+    # scan results (the preview the user approves)
+    scan_total_urls: Mapped[int] = mapped_column(Integer, default=0)
+    scan_occurrences: Mapped[int] = mapped_column(Integer, default=0)
+    scan_already_migrated: Mapped[int] = mapped_column(Integer, default=0)
+    scan_pending: Mapped[int] = mapped_column(Integer, default=0)
+    scan_by_table: Mapped[dict | None] = mapped_column(JsonCol)
+    scan_samples: Mapped[list | None] = mapped_column(JsonCol)
+
+    # upload results
+    uploaded: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    rows_updated: Mapped[int] = mapped_column(Integer, default=0)
+    fields_updated: Mapped[int] = mapped_column(Integer, default=0)
+
+    progress: Mapped[dict | None] = mapped_column(JsonCol)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 # entity name -> model, used by the ingest and the admin routes
 ENTITY_MODELS: dict[str, type] = {
     "projects": Project,

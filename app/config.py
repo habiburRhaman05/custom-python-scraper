@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     ghl_location_id: str = ""
     ghl_parent_folder_id: str = ""  # optional: upload into a specific media folder
     ghl_rate_limit_per_sec: float = 4.0
+    # Parallel download+upload workers. Each file is ~2s of mostly network
+    # wait, so sequential uploads would take ~20h for the full dataset.
+    ghl_workers: int = 6
 
     @property
     def cors_origin_list(self) -> list[str]:

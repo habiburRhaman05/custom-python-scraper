@@ -217,6 +217,28 @@ class ScrapeAccepted(BaseModel):
     poll: str
 
 
+class MediaRunOut(ORMModel):
+    id: int
+    trigger: str
+    status: str
+    started_at: datetime
+    approved_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_seconds: float | None = None
+    scan_total_urls: int = 0
+    scan_occurrences: int = 0
+    scan_already_migrated: int = 0
+    scan_pending: int = 0
+    scan_by_table: dict[str, Any] | None = None
+    scan_samples: list[Any] | None = None
+    uploaded: int = 0
+    failed: int = 0
+    rows_updated: int = 0
+    fields_updated: int = 0
+    progress: dict[str, Any] | None = None
+    error: str | None = None
+
+
 class Health(BaseModel):
     status: str
     database: str

@@ -31,9 +31,11 @@ Defaults to a dry run. Nothing is uploaded or written without --apply.
 from __future__ import annotations
 
 import time
+import concurrent.futures as cf
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import requests
@@ -93,6 +95,10 @@ class ScanResult:
     occurrences: int = 0
     by_table: dict[str, int] = field(default_factory=dict)
 
+    def samples(self, n: int = 8) -> list[str]:
+        """A few real URLs, so the approval screen shows what will change."""
+        return sorted(self.unique_urls)[:n]
+
 
 def scan(db: Session) -> ScanResult:
     """Read-only: find every distinct media URL referenced anywhere in the DB."""
@@ -127,19 +133,34 @@ class GHLClient:
             raise GHLError("GHL_PIT_TOKEN and GHL_LOCATION_ID must be set in .env")
         self.location_id = location_id
         self.parent_folder_id = parent_folder_id
-        self.session = requests.Session()
-        self.session.headers.update({
+        self._headers = {
             "Authorization": f"Bearer {pit_token}",
             "Version": GHL_VERSION,
-        })
+        }
+        # One Session per thread: connection pooling without sharing a
+        # Session across the worker threads that upload concurrently.
+        self._local = threading.local()
         self._min_interval = 1.0 / rate_limit_per_sec if rate_limit_per_sec > 0 else 0.0
         self._last_call = 0.0
+        # Worker threads share this client, so the throttle has to be guarded
+        # or the rate limit is meaningless (and GHL starts returning 429s).
+        self._throttle_lock = threading.Lock()
+
+    @property
+    def session(self) -> requests.Session:
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = requests.Session()
+            s.headers.update(self._headers)
+            self._local.session = s
+        return s
 
     def _throttle(self) -> None:
-        wait = self._min_interval - (time.monotonic() - self._last_call)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call = time.monotonic()
+        with self._throttle_lock:
+            wait = self._min_interval - (time.monotonic() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
 
     MAX_BYTES = 24 * 1024 * 1024  # GHL's own cap is 25MB for non-video files
 
@@ -206,9 +227,31 @@ class GHLClient:
 # ---------------------------------------------------------------------------
 # upload phase -- persists every outcome immediately
 # ---------------------------------------------------------------------------
+def pending_urls(db: Session, urls: set[str]) -> tuple[set[str], int]:
+    """Split a URL set into (not-yet-uploaded, already_successful_count)."""
+    already_ok = {
+        row.source_url
+        for row in db.execute(
+            select(MediaMigration).where(
+                MediaMigration.source_url.in_(urls),
+                MediaMigration.status == "success",
+            )
+        ).scalars()
+    }
+    return urls - already_ok, len(already_ok)
+
+
 def upload_pending(db: Session, urls: set[str], client: GHLClient,
-                    limit: int | None = None) -> dict[str, int]:
-    """Upload every URL not already recorded as a success. Returns counts."""
+                    limit: int | None = None,
+                    on_progress: Callable[[int, int, int, int], None] | None = None,
+                    workers: int = 6,
+                    ) -> dict[str, int]:
+    """
+    Upload every URL not already recorded as a success. Returns counts.
+
+    on_progress(done, total, uploaded, failed) fires every 10 files so the
+    dashboard can show live progress over what is a multi-hour job.
+    """
     existing = {
         row.source_url: row
         for row in db.execute(
@@ -221,34 +264,54 @@ def upload_pending(db: Session, urls: set[str], client: GHLClient,
         pending = pending[:limit]
 
     counts = {"already_cached": len(already_ok), "uploaded": 0, "failed": 0}
-    for url in pending:
+    total = len(pending)
+
+    def _fetch(url: str) -> tuple[str, dict | None, str | None]:
+        """Network-only; runs on a worker thread. Never touches the session."""
         name = url.rsplit("/", 1)[-1].split("?", 1)[0] or None
         try:
-            body = client.upload_from_url(url, name=name)
-            row = existing.get(url) or MediaMigration(source_url=url)
-            row.status = "success"
-            row.ghl_file_id = body.get("fileId")
-            row.ghl_url = body["url"]
-            row.error = None
-            row.updated_at = datetime.now(timezone.utc)
-            db.add(row)
-            db.commit()
-            counts["uploaded"] += 1
+            return url, client.upload_from_url(url, name=name), None
         except GHLError as exc:
+            return url, None, str(exc)[:2000]
+        except Exception as exc:  # a single bad file must not kill the batch
+            return url, None, f"{type(exc).__name__}: {exc}"[:2000]
+
+    # Each file costs ~2s wall-clock, almost all of it waiting on network, so
+    # running these sequentially would take ~20h for the full set. Parallel
+    # workers do the download+upload; the DB is only ever written from this
+    # thread, so the Session stays single-threaded.
+    idx = 0
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for url, body, error in ex.map(_fetch, pending):
+            idx += 1
             row = existing.get(url) or MediaMigration(source_url=url)
-            row.status = "failed"
-            row.error = str(exc)[:2000]
+            if body is not None:
+                row.status = "success"
+                row.ghl_file_id = body.get("fileId")
+                row.ghl_url = body["url"]
+                row.error = None
+                counts["uploaded"] += 1
+            else:
+                row.status = "failed"
+                row.error = error
+                counts["failed"] += 1
             row.updated_at = datetime.now(timezone.utc)
             db.add(row)
             db.commit()
-            counts["failed"] += 1
+
+            # idx == 1 so the progress bar appears right away rather than after
+            # the first 10 files (which, on a slow batch, looks like a hang).
+            if on_progress and (idx == 1 or idx % 10 == 0 or idx == total):
+                on_progress(idx, total, counts["uploaded"], counts["failed"])
     return counts
 
 
 # ---------------------------------------------------------------------------
 # replace phase -- only successes are substituted; failures leave originals
 # ---------------------------------------------------------------------------
-def replace_everywhere(db: Session) -> dict[str, int]:
+def replace_everywhere(db: Session,
+                        on_progress: Callable[[int, int], None] | None = None,
+                        ) -> dict[str, int]:
     mapping = {
         row.source_url: row.ghl_url
         for row in db.execute(
@@ -259,6 +322,8 @@ def replace_everywhere(db: Session) -> dict[str, int]:
         return {"rows_updated": 0, "fields_updated": 0}
 
     rows_updated = fields_updated = 0
+    tables_done = 0
+    tables_total = len(ENTITY_MODELS)
     for model in ENTITY_MODELS.values():
         columns = [c.name for c in model.__table__.columns]
         for row in db.execute(select(model)).scalars():
@@ -276,6 +341,9 @@ def replace_everywhere(db: Session) -> dict[str, int]:
                 fields_updated += 1
             if touched:
                 rows_updated += 1
+        tables_done += 1
+        if on_progress:
+            on_progress(tables_done, tables_total)
     db.commit()
     return {"rows_updated": rows_updated, "fields_updated": fields_updated}
 

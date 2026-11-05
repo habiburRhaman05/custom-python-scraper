@@ -19,9 +19,16 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.jobs import release_lock, run_in_background, start_scrape_job
-from app.models import ENTITY_MODELS, ScrapeRun
+from app.media_jobs import (
+    release_media_lock,
+    run_scan,
+    run_upload,
+    start_media_scan,
+    start_media_upload,
+)
+from app.models import ENTITY_MODELS, MediaRun, ScrapeRun
 from app.routers.common import require_admin
-from app.schemas import RunOut, ScrapeAccepted
+from app.schemas import MediaRunOut, RunOut, ScrapeAccepted
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
@@ -99,3 +106,73 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {run_id} not found")
     return RunOut.model_validate(run)
+
+
+# ---------------------------------------------------------------------------
+# Media migration — two-phase: scan (read-only) then explicit approval.
+# ---------------------------------------------------------------------------
+@router.post(
+    "/media/scan",
+    response_model=MediaRunOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Scan for media to migrate (read-only, nothing uploaded)",
+)
+def media_scan(background: BackgroundTasks, db: Session = Depends(get_db)):
+    started, run_id, message = start_media_scan("api")
+    if not started:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"message": message, "run_id": run_id,
+             "poll": f"/api/admin/media/runs/{run_id}" if run_id else None},
+        )
+    try:
+        background.add_task(run_scan, run_id)
+    except Exception:
+        release_media_lock()
+        raise
+    return MediaRunOut.model_validate(db.get(MediaRun, run_id))
+
+
+@router.post(
+    "/media/runs/{run_id}/approve",
+    response_model=MediaRunOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Approve a scanned run — starts the actual upload",
+)
+def media_approve(run_id: int, background: BackgroundTasks,
+                   db: Session = Depends(get_db),
+                   limit: int | None = Query(
+                       None, ge=1,
+                       description="upload at most N files this run — for a trial "
+                                   "batch; re-approving resumes where it left off")):
+    run = db.get(MediaRun, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"media run {run_id} not found")
+
+    started, message = start_media_upload(run_id)
+    if not started:
+        raise HTTPException(status.HTTP_409_CONFLICT, {"message": message,
+                                                        "run_id": run_id})
+    try:
+        background.add_task(run_upload, run_id, limit)
+    except Exception:
+        release_media_lock()
+        raise
+    db.refresh(run)
+    return MediaRunOut.model_validate(run)
+
+
+@router.get("/media/runs", response_model=list[MediaRunOut],
+             summary="Media migration history")
+def media_runs(db: Session = Depends(get_db), limit: int = Query(25, ge=1, le=200)):
+    stmt = select(MediaRun).order_by(desc(MediaRun.started_at)).limit(limit)
+    return [MediaRunOut.model_validate(r) for r in db.execute(stmt).scalars()]
+
+
+@router.get("/media/runs/{run_id}", response_model=MediaRunOut,
+             summary="One media run — poll this for progress")
+def media_run(run_id: int, db: Session = Depends(get_db)):
+    run = db.get(MediaRun, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"media run {run_id} not found")
+    return MediaRunOut.model_validate(run)
