@@ -9,13 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import scheduler
 from app.config import settings
+from app.jobs import reconcile_orphaned_runs
+from app.media_jobs import reconcile_orphaned_media_runs
 from app.routers import admin, catalog, dashboard, meta, projects
 
 DESCRIPTION = """
-Read API over scraped maisondubai.com (Casadior) off-plan data.
+Read API over scraped Dubai off-plan real estate data.
 
 **Data**: ~2,021 projects, 450 developers, 134 areas, 18 brokers, 27 articles.
-Sourced from the site's public pages and sitemaps; `robots.txt` is respected.
+Sourced from public listing pages and sitemaps; `robots.txt` is respected.
 
 **Refreshing**: `POST /api/admin/scrape` with an `X-API-Key` header starts a
 run in the background and returns a `run_id` to poll. Only records whose
@@ -32,6 +34,16 @@ async def lifespan(app: FastAPI):
             "WARNING: ADMIN_API_KEY is unset — admin routes will return 503. "
             "Set it in .env before deploying."
         )
+    # A process that dies mid-run (crash, deploy restart, OOM) leaves its
+    # ScrapeRun/MediaRun row stuck in an in-progress status forever -- no
+    # thread in THIS process holds the lock for it, so it can never finish,
+    # be paused, or be superseded. Close those rows out before anything else
+    # starts, or every future trigger/pause/schedule silently 409s against a
+    # run that's been dead since the last restart.
+    n1 = reconcile_orphaned_runs()
+    n2 = reconcile_orphaned_media_runs()
+    if n1 or n2:
+        print(f"startup: recovered {n1} orphaned scrape run(s), {n2} orphaned media run(s)")
     scheduler.start()
     try:
         yield

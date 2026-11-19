@@ -63,6 +63,24 @@ def active_media_run(db: Session) -> MediaRun | None:
     ).scalars().first()
 
 
+def reconcile_orphaned_media_runs() -> int:
+    """Startup counterpart to reconcile_orphaned_runs() -- see that docstring."""
+    db = SessionLocal()
+    try:
+        stuck = db.execute(
+            select(MediaRun).where(MediaRun.status.in_(ACTIVE_STATUSES))
+        ).scalars().all()
+        for run in stuck:
+            run.status = "failed"
+            run.finished_at = utcnow()
+            run.error = "orphaned: no process was tracking this run (likely a restart mid-upload)"
+        if stuck:
+            db.commit()
+        return len(stuck)
+    finally:
+        db.close()
+
+
 def start_media_scan(trigger: str = "api") -> tuple[bool, int | None, str]:
     """Claim the lock and open a MediaRun in 'scanning'."""
     if not _media_lock.acquire(blocking=False):
@@ -88,6 +106,24 @@ def start_media_scan(trigger: str = "api") -> tuple[bool, int | None, str]:
         raise
     finally:
         db.close()
+
+
+def force_fail_media(reason: str = "force-stopped by admin") -> int | None:
+    """Manual escape hatch -- see force_fail_scrape() in app/jobs.py."""
+    db = SessionLocal()
+    try:
+        run = active_media_run(db)
+        if run is None:
+            return None
+        run.status = "failed"
+        run.finished_at = utcnow()
+        run.error = reason
+        db.commit()
+        rid = run.id
+    finally:
+        db.close()
+    release_media_lock()
+    return rid
 
 
 def release_media_lock() -> None:
@@ -158,13 +194,15 @@ def start_media_upload(run_id: int) -> tuple[bool, str]:
         db.close()
 
 
-def run_upload(run_id: int, limit: int | None = None) -> None:
+def run_upload(run_id: int, limit: int | None = None, workers: int | None = None) -> None:
     """
     Phase 2. Downloads, uploads to GHL, then rewrites URLs.
 
     `limit` caps how many files this run uploads -- useful for a small trial
     batch before committing to the full set. Re-running picks up where it
     left off, since completed uploads are skipped via the ledger.
+
+    `workers` overrides GHL_WORKERS for this run only.
     """
     db = SessionLocal()
     started = time.time()
@@ -186,7 +224,7 @@ def run_upload(run_id: int, limit: int | None = None) -> None:
 
         counts = upload_pending(db, result.unique_urls, client, limit=limit,
                                  on_progress=_upload_progress,
-                                 workers=settings.ghl_workers,
+                                 workers=workers if workers is not None else settings.ghl_workers,
                                  names=result.names,
                                  should_pause=_media_pause.is_set)
 

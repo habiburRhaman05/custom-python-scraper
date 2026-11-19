@@ -20,8 +20,15 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.jobs import pause_scrape, release_lock, run_in_background, start_scrape_job
+from app.jobs import (
+    force_fail_scrape,
+    pause_scrape,
+    release_lock,
+    run_in_background,
+    start_scrape_job,
+)
 from app.media_jobs import (
+    force_fail_media,
     pause_media,
     release_media_lock,
     run_scan,
@@ -56,6 +63,16 @@ def trigger_scrape(
     limit: int | None = Query(
         None, ge=1, description="max pages per entity type — for smoke tests"
     ),
+    workers: int | None = Query(
+        None, ge=1, le=32, description="override SCRAPE_WORKERS for this run only"
+    ),
+    delay: float | None = Query(
+        None, ge=0, description="override SCRAPE_DELAY (seconds between requests) for this run only"
+    ),
+    revalidate: bool | None = Query(
+        None, description="override SCRAPE_REVALIDATE for this run only — "
+                           "true forces a conditional re-fetch of every page"
+    ),
 ):
     if only:
         unknown = set(only) - set(ENTITY_MODELS) - {"listings"}
@@ -76,7 +93,10 @@ def trigger_scrape(
         )
 
     try:
-        background.add_task(run_in_background, run_id, "api", only, limit)
+        background.add_task(
+            run_in_background, run_id, "api", only, limit,
+            workers=workers, delay=delay, revalidate=revalidate,
+        )
     except Exception:
         release_lock()
         raise
@@ -125,6 +145,21 @@ def pause_scrape_route():
     return {"message": "pause requested — the run will stop within the current batch"}
 
 
+@router.post("/scrape/force-stop", summary="Immediately fail the active run (recovery tool)")
+def force_stop_scrape_route():
+    """
+    For a run that's genuinely stuck (not just slow) -- marks it 'failed'
+    right away instead of waiting for the next page boundary, and frees the
+    lock so a new trigger can start immediately. A restart-orphaned run is
+    already handled automatically on every app startup; reach for this only
+    when a run is stuck in the SAME still-running process.
+    """
+    run_id = force_fail_scrape("force-stopped via admin API")
+    if run_id is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "no scrape is currently running")
+    return {"message": f"run {run_id} force-stopped", "run_id": run_id}
+
+
 # ---------------------------------------------------------------------------
 # Media migration — two-phase: scan (read-only) then explicit approval.
 # ---------------------------------------------------------------------------
@@ -161,7 +196,10 @@ def media_approve(run_id: int, background: BackgroundTasks,
                    limit: int | None = Query(
                        None, ge=1,
                        description="upload at most N files this run — for a trial "
-                                   "batch; re-approving resumes where it left off")):
+                                   "batch; re-approving resumes where it left off"),
+                   workers: int | None = Query(
+                       None, ge=1, le=32,
+                       description="override GHL_WORKERS (upload concurrency) for this run only")):
     run = db.get(MediaRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"media run {run_id} not found")
@@ -171,7 +209,7 @@ def media_approve(run_id: int, background: BackgroundTasks,
         raise HTTPException(status.HTTP_409_CONFLICT, {"message": message,
                                                         "run_id": run_id})
     try:
-        background.add_task(run_upload, run_id, limit)
+        background.add_task(run_upload, run_id, limit, workers)
     except Exception:
         release_media_lock()
         raise
@@ -208,6 +246,15 @@ def pause_media_route():
     return {"message": "pause requested — the upload will stop within the current batch"}
 
 
+@router.post("/media/force-stop", summary="Immediately fail the active media run (recovery tool)")
+def force_stop_media_route():
+    """Manual recovery tool -- see /scrape/force-stop above for when to use this."""
+    run_id = force_fail_media("force-stopped via admin API")
+    if run_id is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "no media job is currently running")
+    return {"message": f"media run {run_id} force-stopped", "run_id": run_id}
+
+
 # ---------------------------------------------------------------------------
 # Scheduling — one-time future triggers, fired by the background poll loop
 # in app/scheduler.py. A scheduled media_migrate runs unattended (scan then
@@ -229,7 +276,10 @@ def _schedule(job_type: str, body: ScheduleRequest, db: Session) -> ScheduledJob
     job = ScheduledJob(
         job_type=job_type, scheduled_at_utc=scheduled_utc, timezone_name=body.timezone,
         status="pending",
-        params={"only": body.only, "limit": body.limit} if job_type == "scrape" else None,
+        params={
+            "only": body.only, "limit": body.limit,
+            "workers": body.workers, "delay": body.delay, "revalidate": body.revalidate,
+        } if job_type == "scrape" else None,
     )
     db.add(job)
     db.commit()

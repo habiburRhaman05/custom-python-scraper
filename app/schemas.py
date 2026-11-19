@@ -244,6 +244,9 @@ class ScheduleRequest(BaseModel):
     timezone: str  # IANA zone name, e.g. "Asia/Dhaka"
     only: list[str] | None = None  # scrape only
     limit: int | None = None  # scrape only
+    workers: int | None = None  # scrape only -- overrides SCRAPE_WORKERS
+    delay: float | None = None  # scrape only -- overrides SCRAPE_DELAY
+    revalidate: bool | None = None  # scrape only -- overrides SCRAPE_REVALIDATE
 
 
 class ScheduledJobOut(ORMModel):

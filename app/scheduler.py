@@ -67,7 +67,11 @@ def _fire_scrape(job_id: int) -> None:
         db.commit()
     finally:
         db.close()
-    run_in_background(run_id, "schedule", params.get("only"), params.get("limit"))
+    run_in_background(
+        run_id, "schedule", params.get("only"), params.get("limit"),
+        workers=params.get("workers"), delay=params.get("delay"),
+        revalidate=params.get("revalidate"),
+    )
 
 
 def _fire_media_migrate(job_id: int) -> None:

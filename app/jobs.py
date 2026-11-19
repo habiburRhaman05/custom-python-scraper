@@ -172,12 +172,19 @@ def run_scrape_and_ingest(
     only: list[str] | None = None,
     limit: int | None = None,
     run_id: int | None = None,
+    workers: int | None = None,
+    delay: float | None = None,
+    revalidate: bool | None = None,
 ) -> dict[str, Any]:
     """
     Scrape, validate, then ingest. Returns a summary dict.
 
     `only`/`limit` make it a partial run: delisting is disabled and the
     count/delist rails are skipped, so a smoke test can't damage real data.
+
+    `workers`/`delay`/`revalidate` override the SCRAPE_* env defaults for
+    this run only -- useful for a one-off faster/slower/forced-refresh run
+    without touching the deployed .env.
     """
     full_run = not only and not limit
     db: Session = SessionLocal()
@@ -206,10 +213,10 @@ def run_scrape_and_ingest(
             out=settings.scrape_output_dir,
             only=only,
             limit=limit,
-            workers=settings.scrape_workers,
-            delay=settings.scrape_delay,
+            workers=workers if workers is not None else settings.scrape_workers,
+            delay=delay if delay is not None else settings.scrape_delay,
             cache_dir=settings.scrape_cache_dir,
-            revalidate=settings.scrape_revalidate,
+            revalidate=revalidate if revalidate is not None else settings.scrape_revalidate,
             write_json=True,
             on_progress=_on_progress,
             should_pause=_scrape_pause.is_set,
@@ -301,6 +308,29 @@ def active_run(db: Session) -> ScrapeRun | None:
     ).scalars().first()
 
 
+def reconcile_orphaned_runs() -> int:
+    """
+    Call once at process startup. A ScrapeRun left 'running' belonged to a
+    thread in a previous process -- this process holds no lock for it, so it
+    can never finish, be paused, or free up the single-flight lock on its
+    own. Close it out as failed so a new trigger isn't permanently blocked.
+    """
+    db = SessionLocal()
+    try:
+        stuck = db.execute(
+            select(ScrapeRun).where(ScrapeRun.status == "running")
+        ).scalars().all()
+        for run in stuck:
+            run.status = "failed"
+            run.finished_at = utcnow()
+            run.error = "orphaned: no process was tracking this run (likely a restart mid-scrape)"
+        if stuck:
+            db.commit()
+        return len(stuck)
+    finally:
+        db.close()
+
+
 def start_scrape_job(
     trigger: str = "api",
     *,
@@ -338,6 +368,30 @@ def start_scrape_job(
         db.close()
 
 
+def force_fail_scrape(reason: str = "force-stopped by admin") -> int | None:
+    """
+    Manual escape hatch: immediately marks the active run (if any) as
+    failed and releases the lock, regardless of whether pause has had a
+    chance to take effect. Intended for a run that's actually stuck (not
+    just slow) -- reconcile_orphaned_runs() already handles the common
+    "process restarted mid-run" case automatically on every startup.
+    """
+    db = SessionLocal()
+    try:
+        run = active_run(db)
+        if run is None:
+            return None
+        run.status = "failed"
+        run.finished_at = utcnow()
+        run.error = reason
+        db.commit()
+        rid = run.id
+    finally:
+        db.close()
+    release_lock()
+    return rid
+
+
 def release_lock() -> None:
     try:
         _run_lock.release()
@@ -346,10 +400,20 @@ def release_lock() -> None:
 
 
 def run_in_background(
-    run_id: int, trigger: str, only: list[str] | None, limit: int | None
+    run_id: int,
+    trigger: str,
+    only: list[str] | None,
+    limit: int | None,
+    *,
+    workers: int | None = None,
+    delay: float | None = None,
+    revalidate: bool | None = None,
 ) -> None:
     """Target for BackgroundTasks; always releases the lock."""
     try:
-        run_scrape_and_ingest(trigger, only=only, limit=limit, run_id=run_id)
+        run_scrape_and_ingest(
+            trigger, only=only, limit=limit, run_id=run_id,
+            workers=workers, delay=delay, revalidate=revalidate,
+        )
     finally:
         release_lock()
